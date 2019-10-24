@@ -5,6 +5,8 @@ output:
     code_folding: 'hide'
 ---
 
+## Filtering criteria: Filter genes by mean level of expression
+
 ```{r load_packages, echo=TRUE, include=FALSE}
 #setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
 
@@ -27,6 +29,9 @@ GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>%
               mutate('ID'=as.character(ensembl_gene_id)) %>% 
               dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
               mutate('Neuronal'=1)
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../PhD-InitialExperiments/FirstYearReview/Data/SFARI/SFARI_genes_with_ensembl_IDs.csv')
 
 rm(GO_annotations)
 ```
