@@ -290,17 +290,19 @@ plot(lift_ROCR, main='Lift curve', col='#86b300')
 rm(pred_ROCR, roc_ROCR, AUC, lift_ROCR)
 ```
 
+---
+
 ### Analyse model
 
-SFARI genes have a slightly higher distribution than the rest
+SFARI genes have a slightly higher score distribution than the rest
 ```{r}
 plot_data = test_set %>% dplyr::select(prob, SFARI)
 
-plot_data %>% ggplot(aes(prob, fill=SFARI, color=SFARI)) + geom_density(alpha=0.3) + 
-              theme_minimal() + ggtitle('Probability distribution by SFARI Label')
+plot_data %>% ggplot(aes(prob, fill=SFARI, color=SFARI)) + geom_density(alpha=0.3) + xlab('Score') +
+              theme_minimal() + ggtitle('Model score distribution by SFARI Label')
 ```
 
-- Scores 1 and 2 have the highest scores!
+- Scores 1 and 2 have the highest scores
 
 - Score 6 has a completely different behaviour to the rest, with a lower distribution even than the unlabelled genes
 ```{r}
@@ -374,6 +376,8 @@ test_set %>% dplyr::select(prob, SFARI) %>% mutate(ID = rownames(test_set)) %>%
 
 ---
 
+<br><br>
+
 ### Negative samples distribution
 
 Running the model on all non-SFARI genes
@@ -384,19 +388,19 @@ rownames(negative_set) = rownames(dataset)[!dataset$SFARI]
 negative_set$prob = predict(fit, newdata=negative_set, type='response')
 negative_set$pred = negative_set$prob>0.5
 
-negative_set = negative_set %>% apply_labels(prob = 'Assigned Probability', 
-                                             pred = 'Label Prediction')
+negative_set_table = negative_set %>% apply_labels(prob = 'Assigned Probability', 
+                                                   pred = 'Label Prediction')
 ```
 
 ```{r}
-cro(negative_set$pred)
+cro(negative_set_table$pred)
 
 cat(paste0('\n', sum(negative_set$pred), ' genes are predicted as ASD-related'))
 ```
 
 ```{r}
 negative_set %>% ggplot(aes(prob)) + geom_density(color='#F8766D', fill='#F8766D', alpha=0.5) +
-                 geom_vline(xintercept=0.5, color='#666666', linetype='dashed') + 
+                 geom_vline(xintercept=0.5, color='#333333', linetype='dotted') + 
                  ggtitle('Probability distribution of all the Negative samples in the dataset') + 
                  theme_minimal()
 ```
@@ -414,7 +418,9 @@ negative_set %>% ggplot(aes(prob, GS, color=MTcor)) + geom_point() + geom_smooth
 
 
 ```{r}
-negative_set %>% ggplot(aes(prob, abs(GS), color=MTcor)) + geom_point() + geom_smooth(method='loess', color='#666666') +
+negative_set %>% ggplot(aes(prob, abs(GS), color=MTcor)) + geom_point() + 
+                 geom_hline(yintercept=mean(negative_set$absGS), color='gray', linetype='dashed') + 
+                 geom_smooth(method='loess', color='#666666') +
                  scale_color_gradientn(colours=c('#F8766D','white','#00BFC4')) + 
                  ggtitle('Relation between Model probability and Gene Significance') + theme_minimal()
 ```
@@ -425,6 +431,7 @@ negative_set %>% ggplot(aes(prob, abs(GS), color=MTcor)) + geom_point() + geom_s
 On average, the genes belonging to the modules with the highest correlation to ASD are assigned a lower probability by the model (???)
 ```{r, fig.width=10}
 negative_set %>% ggplot(aes(MTcor, prob, color=GS)) + geom_point() + geom_smooth(method='loess', color='#666666') + 
+                 geom_hline(yintercept=mean(negative_set$prob), color='gray', linetype='dashed') +
                  scale_color_gradientn(colours=c('#F8766D','#F8766D','white','#00BFC4','#00BFC4')) + 
                  xlab('Modules ordered by their correlation to ASD') + ylab('Model probability') +
                  theme_minimal()
@@ -450,7 +457,7 @@ There is a positive relation between level of expression and probability, the mo
 
 ```{r}
 # Gandal dataset
-load('./../Data/Gandal/preprocessed_data_non_standardised_data.RData')
+load('./../Data/Gandal/preprocessed_data.RData')
 datExpr = datExpr %>% data.frame
 DE_info = DE_info %>% data.frame
 ```
@@ -503,7 +510,7 @@ plot_data %>% ggplot(aes(meanExpr, sdExpr)) + geom_point(alpha=0.1, color='#0099
 
 #### Probability and lfc
 
-There is a relation between probability and lfc, so it IS capturing a bit of true information (because lfc and mean expression were negatively correlated and it still has a positive relation in the model)
+There is a relation between probability and lfc, so it *IS* capturing a bit of true information (because lfc and mean expression were negatively correlated and it still has a positive relation in the model)
 ```{r, fig.width=10}
 plot_data = negative_set %>% mutate(ID=rownames(negative_set)) %>% 
             left_join(DE_info %>% mutate(ID=rownames(DE_info)), by='ID')
@@ -523,8 +530,8 @@ plot_data %>% filter(abs(log2FoldChange)<10) %>%
 
 ---
 
-#### Session info
-```{r print_session_info}
-sessionInfo()
+#### Saving results
+
+```{r}
+save(train_set, test_set, negative_set, fit, dataset, file='./../Data/Gandal/logreg_model.RData')
 ```
-<br><br>

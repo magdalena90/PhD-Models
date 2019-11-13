@@ -1,0 +1,220 @@
+---
+title: 'WGCNA Modules Exploratory Analysis'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
+library(WGCNA)
+library(expss)
+library(polycor)
+library(knitr)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+clustering_selected = 'DynamicHybridMergedSmall'
+
+print(paste0('Using clustering ', clustering_selected))
+```
+
+Load preprocessed dataset (preprocessing code in 19_10_14_data_preprocessing.Rmd) and clustering (pipeline in 19_10_15_WGCNA.Rmd)
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/Gandal/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations
+GO_annotations = read.csv('./../../../PhD-InitialExperiments/FirstYearReview/Data/GO_annotations/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../Data/SFARI/SFARI_genes_08-29-2019_with_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% 
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+
+# Dataset created with DynamicTreeMerged algorithm
+dataset = read.csv(paste0('./../Data/Gandal/dataset_', clustering_selected, '.csv'))
+dataset$Module = dataset[,clustering_selected]
+
+
+rm(DE_info, GO_annotations, clusterings)
+```
+
+```{r}
+print(paste0('There are ', length(unique(dataset$Module)),' modules:'))
+
+dataset$Module %>% table %>% sort(decreasing=TRUE) %>% print
+```
+
+---
+
+## Module-Trait associations
+
+```{r, fig.width=10, fig.height=10, warning=FALSE}
+datTraits = datMeta %>% dplyr::select(Diagnosis_, Region, Sex, Age, PMI, RNAExtractionBatch) %>%
+            rename('Diagnosis' = Diagnosis_, 'ExtractionBatch' = RNAExtractionBatch)
+
+# Recalculate MEs with color labels
+ME_object = datExpr %>% t %>% moduleEigengenes(colors = dataset$Module)
+MEs = orderMEs(ME_object$eigengenes)
+
+# Calculate correlation between eigengenes and the traits and their p-values
+moduleTraitCor = MEs %>% apply(2, function(x) hetcor(x, datTraits, ML=TRUE)$correlations[1,-1]) %>% t
+rownames(moduleTraitCor) = colnames(MEs)
+colnames(moduleTraitCor) = colnames(datTraits)
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nrow(datExpr))
+
+# In case there are any NAs
+if(sum(!complete.cases(moduleTraitCor))>0){
+  print(paste0(sum(is.na(moduleTraitCor)),' correlation(s) could not be calculated')) 
+}
+moduleTraitCor = moduleTraitCor[complete.cases(moduleTraitCor),]
+moduleTraitPvalue = moduleTraitPvalue[complete.cases(moduleTraitCor),]
+
+# Sort moduleTraitCor by Diagnosis
+moduleTraitCor = moduleTraitCor[order(moduleTraitCor[,1], decreasing=TRUE),]
+moduleTraitPvalue = moduleTraitPvalue[order(moduleTraitCor[,1], decreasing=TRUE),]
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+
+labeledHeatmap(Matrix = moduleTraitCor, xLabels = names(datTraits), yLabels =  gsub('ME','',rownames(moduleTraitCor)), 
+               yColorWidth=0, colors = brewer.pal(11,'PiYG'), bg.lab.y = gsub('ME','',rownames(moduleTraitCor)),
+               textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.8, cex.lab.y = 0.75, zlim = c(-1,1),
+               main = paste('Module-Trait relationships'))
+
+rm(ME_object, datTraits, MEs, moduleTraitCor, moduleTraitPvalue, textMatrix)
+```
+
+
+---
+
+## Module vs gene analysis
+
+### Gene significance (Gene-Diagnosis correlation)
+
+Module-Diagnosis correlation and Gene Significance for the genes within each module make sense
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+
+plot_data = data.frame(MTcor=unique(dataset$MTcor)) %>% arrange(by=MTcor) %>% mutate(order=1:length(unique(dataset$MTcor))) %>%
+            left_join(dataset, by='MTcor') %>% filter(!is.na(MTcor)) %>% dplyr::select(ID, MTcor, GS, Module, order)
+
+
+ggplotly(plot_data %>% ggplot(aes(order, GS, group=order)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
+         geom_boxplot(fill=unique(plot_data$Module)) + theme_minimal() + 
+         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('Gene Significance'))
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, GS)) + geom_hline(yintercept=0, color='gray', linetype='dotted') + 
+         geom_point(color=plot_data$Module, alpha=0.1, aes(id=ID)) + geom_smooth(color='gray', alpha=0.3) + 
+         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('Gene Significance'))
+```
+
+### Log Fold Change
+
+Module-Diagnosis correlation and log2FoldChange for the genes within each module make sense
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+
+plot_data = plot_data %>% left_join(genes_info, by='ID') %>% select(ID, order, Module, MTcor, log2FoldChange, baseMean)
+
+ggplotly(plot_data %>% ggplot(aes(order, log2FoldChange, group=order)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
+         geom_boxplot(fill=unique(plot_data$Module)) + 
+         theme_minimal() + xlab('Modules ordered by Module-Diagnosis correlation') + ylab('log2FoldChange'))
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, log2FoldChange)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
+         geom_point(color=plot_data$Module, alpha=0.1, aes(id=ID)) + geom_smooth(color='gray', alpha=0.3) + 
+         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('log2FoldChange'))
+```
+
+### Mean expression
+
+Modules with negative module-trait correlations seem to have higher mean expression than modules with a positive relation
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+ggplotly(plot_data %>% ggplot(aes(order, log2(baseMean+1), group=order)) + 
+         geom_hline(yintercept=mean(log2(plot_data$baseMean+1)), color='gray', linetype='dotted') +
+         geom_boxplot(fill=unique(plot_data$Module)) + theme_minimal() + 
+         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('log2(Mean Expression)'))
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, log2(baseMean+1))) + geom_point(alpha=0.2, color=plot_data$Module, aes(id=ID)) + 
+         geom_hline(yintercept=mean(log2(plot_data$baseMean+1)), color='gray', linetype='dotted') + 
+         geom_smooth(color='gray', alpha=0.3) + theme_minimal() + xlab('Module-Diagnosis correlation'))
+```
+
+
+---
+
+## Relation to SFARI genes
+
+There doesn't seem to be a positive relation between Module-Diagonsis (absolute) correlation and the percentage of SFARI genes in the module (I hoped there would be)
+
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+
+plot_data = dataset %>% mutate('hasSFARIscore' = gene.score!='None') %>% 
+            group_by(Module, MTcor, hasSFARIscore) %>% summarise(p=n()) %>% 
+            left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
+            mutate(p=round(p/n*100,2)) 
+
+for(i in 1:nrow(plot_data)){
+  this_row = plot_data[i,]
+  if(this_row$hasSFARIscore==FALSE & this_row$p==100){
+    new_row = this_row
+    new_row$hasSFARIscore = TRUE
+    new_row$p = 0
+    plot_data = plot_data %>% rbind(new_row)
+  }
+}
+
+plot_data = plot_data %>% filter(hasSFARIscore==TRUE)
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, p, size=n)) + geom_smooth(color='gray', alpha=0.1) +
+         geom_point(color=plot_data$Module, aes(id=Module)) +
+         xlab('Module-Diagnosis correlation') + ylab('% of SFARI genes') +
+         theme_minimal() + theme(legend.position = 'none'))
+
+rm(this_row, i)
+```
+
+There doesn't seem to be a relation between a module's mean expression and the percentage of SFARI genes it contains (I would have thought there would be)
+
+```{r, warning=FALSE, message=FALSE}
+
+aux_data = data.frame('Module'=dataset$Module, 'meanExpr'=rowMeans(datExpr)) %>% group_by(Module) %>% 
+           summarise(meanExpr=mean(meanExpr))
+
+plot_data = plot_data %>% left_join(aux_data, by='Module')
+
+ggplotly(plot_data %>% ggplot(aes(meanExpr, p, size=n)) + geom_smooth(color='gray', alpha=0.1) +
+         geom_point(color=plot_data$Module, aes(id=Module)) + 
+         theme_minimal() + theme(legend.position = 'none'))
+
+```
+
+<br>
+
+An analysis of the genes belonging to the three modules with the highest Module-Diagonsis correlation can be found in `PhD-Models/FirstPUModel/RMarkdowns/19_10_16_dataset_EA.html`
+
+<br><br>
