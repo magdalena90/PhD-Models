@@ -252,7 +252,7 @@ Summarised version of score vs mean expression, plotting by module instead of by
 
 The difference in the trend lines between this plot and the one above is that the one above takes all the points into consideration while this considers each module as an observation by itself, so the top one is strongly affected by big modules and the bottom one treats all modules the same
 
-The transparent version of each point and line are the original values and trends before the bias correction
+The transparent version of each point and trend lines are the original values and trends before the bias correction
 ```{r, warning=FALSE}
 plot_data = negative_set %>% group_by(MTcor) %>% summarise(mean = mean(prob), sd = sd(prob),
               new_mean = mean(corrected_score), new_sd = sd(corrected_score), n = n()) %>%
@@ -262,10 +262,10 @@ colnames(plot_data)[1] = 'ID'
 
 ggplotly(plot_data %>% ggplot(aes(MTcor, new_mean, size=n, color=MTcor_sign)) + geom_point(aes(id=ID)) + 
          geom_smooth(method='loess', color='gray', se=FALSE) + geom_smooth(method='lm', se=FALSE) + 
-         geom_point(aes(y=mean), alpha=0.3) + theme(legend.position='none') +
+         geom_point(aes(y=mean), alpha=0.3) + xlab('Module-Diagnosis correlation') + ylab('Mean Corrected Score by the Model') + 
          geom_line(stat='smooth', method='loess', color='gray', se=FALSE, alpha=0.3, size=1.2, aes(y=mean)) + 
          geom_line(stat='smooth', method='lm', se=FALSE, alpha=0.3, size=1.2, aes(y=mean)) + 
-         xlab('Module-Diagnosis correlation') + ylab('Mean Corrected Score by the Model') + theme_minimal())
+         theme_minimal() + theme(legend.position='none'))
 ```
 
 #### Probability and level of expression
@@ -327,6 +327,33 @@ plot_data %>% filter(abs(log2FoldChange)<10) %>%
               geom_line(stat='smooth', method='loess', color='gray', alpha=0.3, size=1.5, aes(y=prob)) +
               theme_minimal() + ggtitle('lfc vs model probability by gene')
 ```
+
+#### Score and Module-Diagnosis correlation
+
+:/
+```{r warning=FALSE, message=FALSE}
+# Get Module Membership
+original_dataset = read.csv(paste0('./../Data/Gandal/dataset_', clustering_selected, '.csv'))
+original_dataset$Module = original_dataset[,clustering_selected]
+
+module_score = negative_set %>% mutate(ID=rownames(negative_set)) %>% left_join(original_dataset, by='ID') %>%
+               dplyr::select(ID, prob, corrected_score, Module, MTcor.x) %>% rename(MTcor = MTcor.x) %>% 
+               left_join(data.frame(MTcor=unique(dataset$MTcor)) %>% arrange(by=MTcor) %>% 
+                         mutate(order=1:length(unique(dataset$MTcor))), by='MTcor')
+
+ggplotly(module_score %>% ggplot(aes(order, corrected_score, group=order)) + geom_hline(yintercept=0.5, color='gray', linetype='dotted') +
+         geom_boxplot(fill=unique(module_score$Module)) + theme_minimal() + 
+         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('Corrected Score'))
+
+ggplotly(module_score %>% ggplot(aes(MTcor, corrected_score)) + 
+         geom_hline(yintercept=mean(module_score$corrected_score), color='gray', linetype='dotted') + 
+         geom_point(color=module_score$Module, aes(id=ID, alpha=corrected_score^4)) + geom_smooth(color='gray', alpha=0.3) + 
+         geom_line(stat='smooth', method='loess', color='gray', alpha=0.5, size=1.5, aes(y=prob)) +  
+         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('Corrected Score'))
+
+```
+
+
 <br><br>
 
 ### Conclusion
