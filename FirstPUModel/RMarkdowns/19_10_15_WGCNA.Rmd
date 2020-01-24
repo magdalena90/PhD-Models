@@ -260,7 +260,7 @@ merge_most_similar = datExpr %>% t %>% mergeCloseModules(modules, cutHeight = 0.
 rm(MEList, MEs, MEDiss, METree)
 ```
 
-Classification is quite noisy
+Classification is quite noisy with respect to the dendrogram, but that isn't necessarily a bad thing, as Peter Langfelder explains in [this blog post ](https://peterlangfelder.com/2018/12/30/why-wgcna-modules-dont-always-agree-with-the-dendrogram/) from [Insights from a Million Correlations](https://peterlangfelder.com/articles/)
 
 ```{r plot_dend_dynamic_hybrid, warning=FALSE, fig.width=10}
 module_colors = get_mod_colours(modules)
