@@ -79,7 +79,35 @@ cat(paste0('For ', round(100*mean(original_max_membership == gsub('#','',dataset
 
 Apparently this is not the case. Someone asked this in a [Bioconductor question](https://support.bioconductor.org/p/101579/) and Peter Langfelder answered that this is because WGCNA assigns module labels using dynamic tree cut of hierarchical clustering tree that is based on the Toplogical Overlap Measure. TOM results in similar but not quite the same similarity as correlation, hence for some genes the assigned module may differ from the module with highest kME. But that in all, he doesn't worry about the module assignment vs. max. kME differences in his own analyses, and he recommends not worrying about it to others as well.
 
-Before following his advice and stop worrying about it I'm going to try to understand better when these two modules don't match
+Even when the maximum MM module and the assigned module don't match, the assigned module is almost always one of the highest ranked Modules by MM, so it's not that bad that these two metrics don't match.
+
+```{r, fig.width=10}
+
+mm_rank = matrix(0, nrow=nrow(mm), ncol=ncol(mm))
+for(i in 1:nrow(mm_rank)) mm_rank[i,] = rank(-mm[i,], ties.method='min')
+colnames(mm_rank) = colnames(mm)
+rownames(mm_rank) = rownames(mm)
+
+assigned_module_rank = rep('', nrow(mm_rank))
+for(i in 1:nrow(mm_rank)){
+  assigned_module_rank[i] = mm_rank[i, paste0('MM.',gsub('#','',dataset$Module[i]))]
+}
+
+# Remove genes corresponding to the gray module
+assigned_module_rank = assigned_module_rank[dataset$Module!='gray']
+
+plot_data = assigned_module_rank %>% table %>% data.frame
+colnames(plot_data) = c('rank', 'frequency')
+plot_data = plot_data %>% mutate(rank = as.numeric(as.character(rank))) %>% 
+            arrange(rank) %>% mutate('percentage'=round(100*frequency/sum(frequency),2))
+
+ggplotly(plot_data %>% ggplot(aes(rank, frequency, fill=percentage)) + geom_bar(stat='identity') + 
+         theme_minimal() + theme(legend.position='none') + ggtitle('Ranking of assigned module by MM') +
+         xlab('MM rank by assigned Module'))
+
+```
+
+### Heatmaps of maximum Module Membership and assigned Modules
 
 The palette on the top of the heatmap represents the size of the module, the darker the colour, the larger the module
 ```{r heatmap_original_mms, fig.width=10, fig.height=10}
@@ -100,6 +128,8 @@ heatmap.2(table(original_max_membership, gsub('#','',dataset$Module)), dendrogra
           ColSideColors=brewer.pal(9,'PuBu')[module_size$quant])
 
 ```
+
+### Heatmaps of Module Membership by gene
 
 Module Membership by gene (selecting a random sample so it's not that heavy)
 
@@ -158,6 +188,14 @@ heatmap.2(plot_mm, ColSideColors = brewer.pal(9,'RdPu')[module_size$quantME[orde
           trace='none', dendrogram='column', scale='none', col=brewer.pal(9,'Spectral'))
 ```
 
+<br>
+
+### Behaviour differences between assigned module and module with maximum MM
+
+<br>
+
+#### Mean Expression by Gene and by Module
+
 Because of the weird inversion in the heatmap palette from above, check if there's a relation between the gene's level of expression and the average level of expression of the module it is assigned to: there is and it is positive, so something weird is happening in the heatmaps above
 
 I'm not sure how to compare these two plots ... 
@@ -188,11 +226,8 @@ p2 = MM_plot_data %>% ggplot(aes(ModuleMeanExpr, GeneMeanExpr)) + geom_point(alp
 
 grid.arrange(p1, p2, nrow = 1)
 
-
 rm(p1, p2)
 ```
-
-#### Mean expression relation by assigned module and module with the highest module membership
 
 Assigning genes by MM increases the mean expression of the largest modules and decreases the mean expression of the smallest ones
 ```{r, warning=FALSE}
@@ -213,8 +248,39 @@ ggplotly(plot_data %>% ggplot(aes(meanExpr, n)) + geom_point(color=gsub('#gray',
          geom_smooth(color='gray', alpha=0.1) + theme_minimal())
 ```
 
+To see if the strength of the relation between level of expression and assigned module (using the regular WGCNA assignment vs using the maximum MM), I'm going to fit a linear regression to these two module classifications and see which has a better performance.
 
-#### Module size by assigned module and module with the highest module membership
+It seems like the maxMM Module assignment has a stronger relation with mean expression than the originally asigned Modules ... but I'm not sure how reliable this results are
+
+```{r}
+
+lm_data = data.frame('MeanExpr' = log2(rowMeans(datExpr)+1), 'MMModule' = as.factor(original_max_membership), 
+                     'assignedModule' = as.factor(gsub('#','',dataset$Module)))
+
+lm_MM = lm(MeanExpr ~ MMModule, data=lm_data[lm_data$MMModule!='gray',])
+lm_aM = lm(MeanExpr ~ assignedModule, data=lm_data[lm_data$assignedModule!='gray',])
+
+cat('Results using the maxMM Module:')
+summary(lm_MM)
+
+cat('Results using the assigned Module:')
+summary(lm_aM)
+```
+
+The models are quite similar
+```{r, warning=FALSE}
+coefs_MM = summary(lm_MM)$coefficients %>% data.frame %>% mutate('Module' = gsub('MMModule','',rownames(.)))
+coefs_aM = summary(lm_aM)$coefficients %>% data.frame %>% mutate('Module' = gsub('assignedModule','',gsub('#','',rownames(.))))
+
+plot_data = coefs_MM %>% left_join(coefs_aM, by='Module') %>% mutate('color'=ifelse(Module=='(Intercept)', 'gray', paste0('#',Module)))
+
+ggplotly(plot_data %>% ggplot(aes(Estimate.x, Estimate.y)) + geom_point(color=plot_data$color, aes(id=Module)) + 
+         geom_abline(slope=1, intercept=0, color='gray') + xlab('Estimate MM Model') + ylab('Estimate assignedModule Model') + 
+         theme_minimal() + ggtitle('Relation between coefficients'))
+
+```
+
+#### Module Size
 
 Assigning genes by MM balances more the size of the modules, increasing the smallest ones and reducing the largest ones. Mean expression doesn't seem to be a important factor here.
 
@@ -227,7 +293,6 @@ ggplotly(plot_data %>% ggplot(aes(AssignedModuleN, MMModuleN, size=meanExpr.x)) 
          ggtitle('Module Size') + xlab('Size of Assigned Module') + ylab('Size of Module with Higest MM') + theme_minimal())
 ```
 
-
 ### Conclusion
 
 - The module assigned to each gene and the module with the highest Module Membership don't need to be the same and it's fine, it's because they are done with different methods
@@ -236,7 +301,7 @@ ggplotly(plot_data %>% ggplot(aes(AssignedModuleN, MMModuleN, size=meanExpr.x)) 
 
 - There seems to be some relation between the mean level of expression of a gene and MM (this shouldn't happen...)
 
-- If we use maximum MM as a criteria for assigning modules, the resulting modules have more balanced sizes (I still need to see how to study what happens with the mean level of expression bias)
+- If we use maximum MM as a criteria for assigning modules, the resulting modules have more balanced sizes but it looks like the bias by level of expression gets stronger (although I'm not sure about how reliable these results are)
 
 <br><br>
 

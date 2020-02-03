@@ -217,9 +217,9 @@ Modules with a high Module-Diagnosis correlation should have a high content of d
 ```{r MD_DE_genes, warning=FALSE}
 plot_data = genes_info %>% group_by(Module, MTcor) %>% summarise(p = 100*mean(significant))
 
-ggplotly(plot_data %>% ggplot(aes(MTcor, p)) + geom_hline(yintercept=mean(plot_data$p), color='gray', linetype='dotted') +
+plot_data %>% ggplot(aes(MTcor, p)) + geom_hline(yintercept=mean(plot_data$p), color='gray', linetype='dotted') +
          geom_point(color=plot_data$Module, aes(id=Module)) + theme_minimal() + 
-         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('Percentage of differentially expressed genes'))
+         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('Percentage of differentially expressed genes')
 ```
 
 <br>
@@ -305,9 +305,9 @@ plot_data = dataset %>% dplyr::select(ID, MTcor, GS) %>% left_join(genes_info %>
             left_join(data.frame(MTcor=unique(dataset$MTcor)) %>% arrange(by=MTcor) %>% 
                                  mutate(order=1:length(unique(dataset$MTcor))), by='MTcor')
 
-ggplotly(plot_data %>% ggplot(aes(GS, log2FoldChange)) + geom_point(color=plot_data$Module, alpha=0.5) + 
+ggplotly(plot_data %>% ggplot(aes(GS, log2FoldChange)) + geom_point(color=plot_data$Module, alpha=0.5, aes(ID=Module)) + 
          geom_smooth(color='gray') + theme_minimal() + xlab('Gene Significance') + 
-         ggtitle(paste0('Correlation = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1], 2))))
+         ggtitle(paste0('Correlation = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1], 4))))
 ```
 
 <br>
@@ -319,15 +319,18 @@ In general, modules with the highest Module-Diagnosis correlation should have ge
 **Note:** For the Module-Diagnosis plots, if you do boxplots, you lose the exact module-diagnosis correlation and you only keep the order, so I decided to compensate this downside with a second plot, where each point is plotted individually using their module's Module-Diagnosis correlation as the x axis. I think the boxplot plot is easier to understand but the second plot contains more information, so I don't know which one is better.
 
 ```{r MD_GS_boxplot, fig.width=10}
+plot_data = plot_data %>% arrange(order)
+
 ggplotly(plot_data %>% ggplot(aes(order, GS, group=order)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
          geom_boxplot(fill=unique(plot_data$Module)) + theme_minimal() + 
          xlab('Modules ordered by Module-Diagnosis correlation') + ylab('Gene Significance'))
 ```
 
 ```{r MD_GS_points, fig.width=10, warning=FALSE, message=FALSE}
-ggplotly(plot_data %>% ggplot(aes(MTcor, GS)) + geom_hline(yintercept=0, color='gray', linetype='dotted') + 
+plot_data %>% ggplot(aes(MTcor, GS)) + geom_hline(yintercept=0, color='gray', linetype='dotted') + 
          geom_point(color=plot_data$Module, alpha=0.1, aes(id=ID)) + geom_smooth(color='gray', alpha=0.3) + 
-         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('Gene Significance'))
+         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('Gene Significance') + 
+         ggtitle(paste0('R^2=',round(cor(plot_data$MTcor, plot_data$GS)^2,4)))
 ```
 
 ### 3. Module-Diagnosis correlation vs Log Fold Change
@@ -343,7 +346,8 @@ ggplotly(plot_data %>% ggplot(aes(order, log2FoldChange, group=order)) + geom_hl
 ```{r MD_LFC_points, fig.width=10, warning=FALSE, message=FALSE}
 ggplotly(plot_data %>% ggplot(aes(MTcor, log2FoldChange)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
          geom_point(color=plot_data$Module, alpha=0.1, aes(id=ID)) + geom_smooth(color='gray', alpha=0.3) + 
-         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('log2FoldChange'))
+         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('log2FoldChange') + 
+         ggtitle(paste0('R^2=',round(cor(plot_data$MTcor, plot_data$log2FoldChange)^2,4))))
 ```
 
 <br>
@@ -360,9 +364,10 @@ ggplotly(plot_data %>% ggplot(aes(order, log2(baseMean+1), group=order)) +
 ```
 
 ```{r MD_ME_points, fig.width=10, warning=FALSE, message=FALSE}
-ggplotly(plot_data %>% ggplot(aes(MTcor, log2(baseMean+1))) + geom_point(alpha=0.2, color=plot_data$Module, aes(id=ID)) + 
+plot_data %>% ggplot(aes(MTcor, log2(baseMean+1))) + geom_point(alpha=0.2, color=plot_data$Module, aes(id=ID)) + 
          geom_hline(yintercept=mean(log2(plot_data$baseMean+1)), color='gray', linetype='dotted') + 
-         geom_smooth(color='gray', alpha=0.3) + theme_minimal() + xlab('Module-Diagnosis correlation'))
+         geom_smooth(color='gray', alpha=0.3) + theme_minimal() + xlab('Module-Diagnosis correlation') +
+         ggtitle(paste0('R^2=',round(cor(plot_data$MTcor, log2(plot_data$baseMean+1))^2,4)))
 ```
 
 ### Conclusion:
@@ -377,11 +382,11 @@ Since SFARI scores genes depending on the strength of the evidence linking it to
 
 ### SFARI Scores vs Gene Significance
 
-- SFARI scores 1 to 5 have a lower median than all genes that have a neuronal-related annotation <span style="color:'red'>!</span>
+- SFARI scores 1 to 5 have a lower median than all genes that have a neuronal-related annotation <span style="color:red">(!)</span>
 
-- The group with the highest Gene Significance is SFARI score 6, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:'red'>!</span>
+- The group with the highest Gene Significance is SFARI score 6, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:red">(!)</span>
 
-- SFARI score 1 is the group with the lowest Gene Significance, with a (slightly) lower median than the genes without any type of Neuronal annotation <span style="color:'red'>!</span>
+- SFARI score 1 is the group with the lowest Gene Significance, with a (slightly) lower median than the genes without any type of Neuronal annotation <span style="color:red">(!)</span>
 
 - Neuronal annotated genes have higher Gene Significance than genes without any neuronal-related annotation (makes sense)
 
@@ -393,13 +398,13 @@ ggplotly(plot_data %>% ggplot(aes(gene.score, abs(GS), fill=gene.score)) + geom_
 
 ### SFARI Scores vs Module-Diagnosis correlation
 
-- The higher the SFARI score, the lower the Module-Trait correlation <span style="color:'red'>!</span>
+- The higher the SFARI score, the lower the Module-Trait correlation <span style="color:red">(!)</span>
 
-- SFARI scores 1 and 2 have significantly lower values of Module-Trait correlation than the rest of the groups <span style="color:'red'>!</span>
+- SFARI scores 1 and 2 have significantly lower values of Module-Trait correlation than the rest of the groups <span style="color:red">(!)</span>
 
-- The group with the highest Module-Diagnosis correlation is SFARI score 6, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:'red'>!</span>
+- The group with the highest Module-Diagnosis correlation is SFARI score 6, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:red">(!)</span>
 
-- SFARI score 1 is the group with the lowest Module-Diagonsis correlation, with a median equal to the first quartile of the genes without any type of Neuronal annotation <span style="color:'red'>!</span>
+- SFARI score 1 is the group with the lowest Module-Diagonsis correlation, with a median equal to the first quartile of the genes without any type of Neuronal annotation <span style="color:red">(!)</span>
 
 ```{r SFARI_MD, fig.width=10, warning=FALSE, message=FALSE}
 ggplotly(plot_data %>% ggplot(aes(gene.score, abs(MTcor), fill=gene.score)) + geom_boxplot() + 
