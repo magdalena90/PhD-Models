@@ -163,7 +163,7 @@ create_plot = function(module){
   
   SFARI_colors = as.numeric(names(table(as.character(plot_data$gene.score)[plot_data$gene.score!='None'])))
   
-  p = ggplotly(plot_data %>% ggplot(aes(Module, GS, color=gene.score)) + geom_point(alpha=0.5, aes(ID=ID)) + ylab('|Gene Significance|')
+  p = ggplotly(plot_data %>% ggplot(aes(Module, GS, color=gene.score)) + geom_point(alpha=0.5, aes(ID=ID)) + ylab('|Gene Significance|') +
                scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,8))) + theme_minimal() + xlab('Module Membership') +
                ggtitle(paste0('Module ', module,'  (MTcor = ', round(moduleTraitCor[paste0('ME',module),1],2),')')))
   
@@ -210,14 +210,27 @@ rm(i, this_row, new_row, plot_data)
 
 ### Module Eigengenes
 
-Since these modules have the strongest relation to autism, this pattern should be reflect in their model eigengenes, having two different behaviours for the samples corresponding to autism and the ones corresponding to control
+Since these modules have the strongest relation to autism, this pattern should be reflected in their model eigengenes, having two different behaviours for the samples corresponding to autism and the ones corresponding to control.
 
-```{r}
+In all three cases, the Eigengenes separate the behaviour between autism and control samples very clearly!
+```{r, fig.width=10}
 
-module = top_modules[1]
+plot_EGs = function(module){
 
-plot_data = data.frame('ID' = rownames(MEs), 'MEs' = MEs[,paste0('ME',module)], 'Diagnosis' = datMeta$Diagnosis_)
+  plot_data = data.frame('ID' = rownames(MEs), 'MEs' = MEs[,paste0('ME',module)], 'Diagnosis' = datMeta$Diagnosis_)
 
+  p = plot_data %>% ggplot(aes(Diagnosis, MEs, fill=Diagnosis)) + geom_boxplot() + theme_minimal() + theme(legend.position='none') +
+                    ggtitle(paste0('Module ', module, '  (MTcor=',round(moduleTraitCor[paste0('ME',module),1],2),')'))
+  return(p)
+}
+
+p1 = plot_EGs(top_modules[1])
+p2 = plot_EGs(top_modules[2])
+p3 = plot_EGs(top_modules[3])
+
+grid.arrange(p1, p2, p3, nrow=1)
+
+rm(plot_EGs, p1, p2, p3)
 ```
 
 ---
