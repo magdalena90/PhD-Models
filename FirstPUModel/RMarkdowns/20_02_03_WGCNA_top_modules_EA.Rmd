@@ -14,6 +14,7 @@ library(expss)
 library(polycor)
 library(foreach) ; library(doParallel)
 library(knitr)
+library(biomaRt)
 suppressWarnings(suppressMessages(library(WGCNA)))
 
 SFARI_colour_hue = function(r) {
@@ -54,6 +55,15 @@ genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by=
   mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
   mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
          significant=padj<0.05 & !is.na(padj))
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
+
+genes_info = genes_info %>% left_join(gene_names, by=c('ID'='ensembl_gene_id'))
+
 
 clustering_selected = 'DynamicHybrid'
 genes_info$Module = genes_info[,clustering_selected]
@@ -163,7 +173,7 @@ create_plot = function(module){
   
   SFARI_colors = as.numeric(names(table(as.character(plot_data$gene.score)[plot_data$gene.score!='None'])))
   
-  p = ggplotly(plot_data %>% ggplot(aes(Module, GS, color=gene.score)) + geom_point(alpha=0.5, aes(ID=ID)) + ylab('|Gene Significance|') +
+  p = ggplotly(plot_data %>% ggplot(aes(Module, GS, color=gene.score)) + geom_point(alpha=0.5, aes(ID=ID)) + ylab('Gene Significance') +
                scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,8))) + theme_minimal() + xlab('Module Membership') +
                ggtitle(paste0('Module ', module,'  (MTcor = ', round(moduleTraitCor[paste0('ME',module),1],2),')')))
   
@@ -177,9 +187,9 @@ create_plot(top_modules[3])
 rm(create_plot)
 ```
 
-Modules with the strongest module-diagnosis correlation should have the highest percentage of SFARI Genes, but the plot shows this relation in modules with correlations close to 0.
+Modules with the strongest module-diagnosis correlation should have the highest percentage of SFARI Genes, but this doesn't seem to be the case (even the opposite may be true)
 
-```{r, warning=FALSE}
+```{r, warning=FALSE, message=FALSE}
 plot_data = dataset %>% mutate('hasSFARIscore' = gene.score!='None') %>% 
             group_by(Module, MTcor, hasSFARIscore) %>% summarise(p=n()) %>% 
             left_join(dataset %>% group_by(Module) %>% summarise(n=n()), by='Module') %>% 
@@ -198,13 +208,12 @@ for(i in 1:nrow(plot_data)){
 plot_data = plot_data %>% filter(hasSFARIscore==TRUE)
 
 ggplotly(plot_data %>% ggplot(aes(MTcor, p, size=n)) + geom_smooth(color='gray', se=FALSE) +
-         geom_point(color=plot_data$Module, aes(id=Module)) +
+         geom_point(color=plot_data$Module, alpha=0.5, aes(id=Module)) + geom_hline(yintercept=mean(plot_data$p), color='gray') +
          xlab('Module-Diagnosis correlation') + ylab('% of SFARI genes') +
          theme_minimal() + theme(legend.position = 'none'))
 
 rm(i, this_row, new_row, plot_data)
 ```
-
 
 ---
 
@@ -245,9 +254,10 @@ Only two SFARI Genes in the three lists, none from scores 1 and 2...
 ```{r select_important_genes, warning=FALSE, message=FALSE}
 
 create_table = function(module){
-  top_genes = dataset %>% dplyr::select(ID, paste0('MM.',gsub('#','',module)), GS, gene.score) %>% filter(dataset$Module==module) %>%
-              rename('MM' = paste0('MM.',gsub('#','',module))) %>% mutate(importance = (MM+abs(GS))/2) %>% arrange(by=-importance) %>%
-              top_n(10)
+  top_genes = dataset %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>% 
+              dplyr::select(external_gene_id, paste0('MM.',gsub('#','',module)), GS, gene.score) %>%
+              filter(dataset$Module==module) %>% rename('MM' = paste0('MM.',gsub('#','',module))) %>% 
+              mutate(importance = (MM+abs(GS))/2) %>% arrange(by=-importance) %>% top_n(10)
   return(top_genes)
 }
 

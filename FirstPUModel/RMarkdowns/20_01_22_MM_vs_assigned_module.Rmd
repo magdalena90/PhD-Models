@@ -68,10 +68,16 @@ rm(DE_info, GO_annotations, clusterings)
 ```
 
 Check if for each gene, the module with the smallest distance is their corresponding module
+
+**Note:** Since the gray cluster is not actually a cluster, but the absence of cluster, I don't think it would be correct to study its Module Membership as the other modules, so I'm going to leave all of the genes belonging to the gray module as they are, and I'm not going to assign any new gene to that module.
+
 ```{r}
 mm = dataset %>% dplyr::select(starts_with('MM.'), starts_with('MMgray')) %>% dplyr::rename(MM.gray = MMgray)
 rownames(mm) = dataset$ID
-original_max_membership = gsub('MM.', '', colnames(mm)[max.col(mm, ties.method='first')])
+
+mm_wo_gray = mm[,-which(colnames(mm)=='MM.gray')]
+original_max_membership = gsub('MM.', '', colnames(mm_wo_gray)[max.col(mm_wo_gray, ties.method='first')])
+original_max_membership[dataset$Module=='gray'] = 'gray'
 
 cat(paste0('For ', round(100*mean(original_max_membership == gsub('#','',dataset$Module))),
            '% of the genes, their assigned module corresponds to the module with the highest Module Membership'))
@@ -81,29 +87,35 @@ Apparently this is not the case. Someone asked this in a [Bioconductor question]
 
 Even when the maximum MM module and the assigned module don't match, the assigned module is almost always one of the highest ranked Modules by MM, so it's not that bad that these two metrics don't match.
 
+**Note:** Genes corresponding to the gray module are not included in this plot
 ```{r, fig.width=10}
 
-mm_rank = matrix(0, nrow=nrow(mm), ncol=ncol(mm))
-for(i in 1:nrow(mm_rank)) mm_rank[i,] = rank(-mm[i,], ties.method='min')
-colnames(mm_rank) = colnames(mm)
-rownames(mm_rank) = rownames(mm)
+# Create ranking matrix excluding the gray module column
+mm_rank = matrix(0, nrow=nrow(mm_wo_gray), ncol=ncol(mm_wo_gray))
+for(i in 1:nrow(mm_rank)) mm_rank[i,] = rank(-mm_wo_gray[i,], ties.method='min')
+colnames(mm_rank) = colnames(mm_wo_gray)
+rownames(mm_rank) = rownames(mm_wo_gray)
 
+# Get the ranking of the assigned module
 assigned_module_rank = rep('', nrow(mm_rank))
 for(i in 1:nrow(mm_rank)){
-  assigned_module_rank[i] = mm_rank[i, paste0('MM.',gsub('#','',dataset$Module[i]))]
+  if(dataset$Module[i]!='gray'){
+    assigned_module_rank[i] = mm_rank[i, paste0('MM.',gsub('#','',dataset$Module[i]))] 
+  }
 }
 
 # Remove genes corresponding to the gray module
 assigned_module_rank = assigned_module_rank[dataset$Module!='gray']
 
+# Plot data
 plot_data = assigned_module_rank %>% table %>% data.frame
 colnames(plot_data) = c('rank', 'frequency')
 plot_data = plot_data %>% mutate(rank = as.numeric(as.character(rank))) %>% 
             arrange(rank) %>% mutate('percentage'=round(100*frequency/sum(frequency),2))
 
 ggplotly(plot_data %>% ggplot(aes(rank, frequency, fill=percentage)) + geom_bar(stat='identity') + 
-         theme_minimal() + theme(legend.position='none') + ggtitle('Ranking of assigned module by MM') +
-         xlab('MM rank by assigned Module'))
+         theme_minimal() + theme(legend.position='none') + ggtitle('Ranking of assigned module by Module Membership') +
+         xlab('MM ranking for the assigned Modules'))
 
 ```
 
@@ -162,6 +174,8 @@ heatmap.2(abs(plot_mm), ColSideColors = brewer.pal(9,'PuBu')[module_size$quant[o
 ```
 
 Checking if the mean expression of the modules plays a role
+
+**Note:** The gray module is the one with the lowest mean level of expression of all the modules
 ```{r heatmap_genes_modules_abs_wo_order, fig.width=10, fig.height=10}
 plot_mm = plot_mm[order(rowMeans(plot_mm)), module_size$Module[order(module_size$meanExpr)]]
 heatmap.2(plot_mm, ColSideColors = brewer.pal(9,'RdPu')[module_size$quantME[order(module_size$meanExpr)]], keysize=1, 
@@ -250,7 +264,7 @@ ggplotly(plot_data %>% ggplot(aes(meanExpr, n)) + geom_point(color=gsub('#gray',
 
 To see if the strength of the relation between level of expression and assigned module (using the regular WGCNA assignment vs using the maximum MM), I'm going to fit a linear regression to these two module classifications and see which has a better performance.
 
-It seems like the maxMM Module assignment has a stronger relation with mean expression than the originally asigned Modules ... but I'm not sure how reliable this results are
+It seems like the maxMM Module assignment has a stronger relation with mean expression than the originally asigned Modules ... which would be bad, but I'm not sure how reliable this results are
 
 ```{r}
 
@@ -295,7 +309,7 @@ ggplotly(plot_data %>% ggplot(aes(AssignedModuleN, MMModuleN, size=meanExpr.x)) 
 
 ### Conclusion
 
-- The module assigned to each gene and the module with the highest Module Membership don't need to be the same and it's fine, it's because they are done with different methods
+- The module assigned to each gene and the module with the highest Module Membership don't need to be the same and it's fine, it's because they are calculated with different methods
 
 - The biggest modules have the strongest MM values (both positive and negative)
 
