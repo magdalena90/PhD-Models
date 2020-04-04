@@ -1,0 +1,8 @@
+
+*.RData
+*.Rhistory
+*/.Rhistory
+*/*/.Rhistory
+*/Data/
+*Pipfile*
+*.idea/

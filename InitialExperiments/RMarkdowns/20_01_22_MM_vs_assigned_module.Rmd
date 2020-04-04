@@ -1,0 +1,327 @@
+---
+title: 'Module Membership and Assigned Module'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(gplots)
+library(WGCNA)
+library(expss)
+library(polycor)
+library(knitr)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+clustering_selected = 'DynamicHybridMergedSmall'
+#clustering_selected = 'DynamicHybrid'
+
+cat(paste0('Using clustering ', clustering_selected))
+```
+
+Load preprocessed dataset (preprocessing code in 19_10_14_data_preprocessing.Rmd) and clustering (pipeline in 19_10_15_WGCNA.Rmd)
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/Gandal/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations
+GO_annotations = read.csv('./../../../PhD-InitialExperiments/FirstYearReview/Data/GO_annotations/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../Data/SFARI/SFARI_genes_08-29-2019_with_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% 
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+
+# Dataset created with DynamicTreeMerged algorithm
+dataset = read.csv(paste0('./../Data/Gandal/dataset_', clustering_selected, '.csv'))
+dataset$Module = dataset[,clustering_selected]
+
+
+# GO DEA
+# load('./../Data/Gandal/GO_DE_clusters.RData')
+
+rm(DE_info, GO_annotations, clusterings)
+```
+
+Check if for each gene, the module with the smallest distance is their corresponding module
+
+**Note:** Since the gray cluster is not actually a cluster, but the absence of cluster, I don't think it would be correct to study its Module Membership as the other modules, so I'm going to leave all of the genes belonging to the gray module as they are, and I'm not going to assign any new gene to that module.
+
+```{r}
+mm = dataset %>% dplyr::select(starts_with('MM.'), starts_with('MMgray')) %>% dplyr::rename(MM.gray = MMgray)
+rownames(mm) = dataset$ID
+
+mm_wo_gray = mm[,-which(colnames(mm)=='MM.gray')]
+original_max_membership = gsub('MM.', '', colnames(mm_wo_gray)[max.col(mm_wo_gray, ties.method='first')])
+original_max_membership[dataset$Module=='gray'] = 'gray'
+
+cat(paste0('For ', round(100*mean(original_max_membership == gsub('#','',dataset$Module))),
+           '% of the genes, their assigned module corresponds to the module with the highest Module Membership'))
+```
+
+Apparently this is not the case. Someone asked this in a [Bioconductor question](https://support.bioconductor.org/p/101579/) and Peter Langfelder answered that this is because WGCNA assigns module labels using dynamic tree cut of hierarchical clustering tree that is based on the Toplogical Overlap Measure. TOM results in similar but not quite the same similarity as correlation, hence for some genes the assigned module may differ from the module with highest kME. But that in all, he doesn't worry about the module assignment vs. max. kME differences in his own analyses, and he recommends not worrying about it to others as well.
+
+Even when the maximum MM module and the assigned module don't match, the assigned module is almost always one of the highest ranked Modules by MM, so it's not that bad that these two metrics don't match.
+
+**Note:** Genes corresponding to the gray module are not included in this plot
+```{r, fig.width=10}
+
+# Create ranking matrix excluding the gray module column
+mm_rank = matrix(0, nrow=nrow(mm_wo_gray), ncol=ncol(mm_wo_gray))
+for(i in 1:nrow(mm_rank)) mm_rank[i,] = rank(-mm_wo_gray[i,], ties.method='min')
+colnames(mm_rank) = colnames(mm_wo_gray)
+rownames(mm_rank) = rownames(mm_wo_gray)
+
+# Get the ranking of the assigned module
+assigned_module_rank = rep('', nrow(mm_rank))
+for(i in 1:nrow(mm_rank)){
+  if(dataset$Module[i]!='gray'){
+    assigned_module_rank[i] = mm_rank[i, paste0('MM.',gsub('#','',dataset$Module[i]))] 
+  }
+}
+
+# Remove genes corresponding to the gray module
+assigned_module_rank = assigned_module_rank[dataset$Module!='gray']
+
+# Plot data
+plot_data = assigned_module_rank %>% table %>% data.frame
+colnames(plot_data) = c('rank', 'frequency')
+plot_data = plot_data %>% mutate(rank = as.numeric(as.character(rank))) %>% 
+            arrange(rank) %>% mutate('percentage'=round(100*frequency/sum(frequency),2))
+
+ggplotly(plot_data %>% ggplot(aes(rank, frequency, fill=percentage)) + geom_bar(stat='identity') + 
+         theme_minimal() + theme(legend.position='none') + ggtitle('Ranking of assigned module by Module Membership') +
+         xlab('MM ranking for the assigned Modules'))
+
+```
+
+### Heatmaps of maximum Module Membership and assigned Modules
+
+The palette on the top of the heatmap represents the size of the module, the darker the colour, the larger the module
+```{r heatmap_original_mms, fig.width=10, fig.height=10}
+module_size = dataset %>% group_by(Module) %>% tally %>% mutate(Module = gsub('#', '', Module))
+module_size$quant = cut(module_size$n, breaks=9, labels=FALSE)
+module_size$meanExpr = sapply(module_size$Module, function(m){mean(rowMeans(datExpr)[dataset$Module==m | dataset$Module==paste0('#',m)])})
+module_size$quantME = cut(module_size$meanExpr, breaks=9, labels=FALSE)
+
+heatmap.2(table(original_max_membership, gsub('#','',dataset$Module)), symm=TRUE, dendrogram='none', keysize=1,
+          trace='none', scale='none', col=brewer.pal(9,'YlGnBu'), xlab='Assigned Module',  ylab='Highest MM',
+          ColSideColors = brewer.pal(9,'PuBu')[module_size$quant])
+```
+
+Scaling by rows it's easier to see that genes assigned to the larger modules sometimes have a higher module membership with smaller modules
+```{r heatmap_original_mms_scaled, fig.height=10, fig.width=10}
+heatmap.2(table(original_max_membership, gsub('#','',dataset$Module)), dendrogram='none', keysize=1, symm=TRUE,
+          trace='none', scale='row', col=brewer.pal(9,'YlGnBu'), xlab='Assigned Module',  ylab='Highest MM',
+          ColSideColors=brewer.pal(9,'PuBu')[module_size$quant])
+
+```
+
+### Heatmaps of Module Membership by gene
+
+Module Membership by gene (selecting a random sample so it's not that heavy)
+
+The membership of some module seems to be related to the level of expression of the genes
+```{r heatmap_genes_modules, fig.width=10, fig.height=10}
+set.seed(123)
+plot_mm = mm %>% sample_frac(0.05) %>% as.matrix
+colnames(plot_mm) = gsub('MM.','', colnames(plot_mm))
+plot_mm = plot_mm[order(rowMeans(plot_mm)), module_size$Module[order(module_size$n)]]
+
+heatmap.2(plot_mm, xlab('Modules ordered by Size'), ylab('Genes ordered by mean expression'), keysize=1,
+          ColSideColors = brewer.pal(9,'PuBu')[module_size$quant[order(module_size$n)]],
+          RowSideColors = brewer.pal(9, 'RdPu')[cut(rowMeans(plot_mm), breaks=9, labels=FALSE)],
+          trace='none', dendrogram='none', scale='none', Rowv=FALSE, Colv=FALSE, col=brewer.pal(9,'Spectral'))
+```
+
+Letting the heatmap order the genes and modules by distance, it seems like the module size is not an important factor but the mean expression is. The modules in the right leg of the dendrogram seem to be associated to genes with low expression and the ones on the left leg to genes with high expression
+```{r fig.width=10, fig.height=10}
+heatmap.2(plot_mm, trace='none', col=brewer.pal(9,'Spectral'), dendrogram='column',
+          RowSideColors = brewer.pal(9, 'RdPu')[cut(rowMeans(plot_mm), breaks=9, labels=FALSE)],
+          ColSideColors = brewer.pal(9,'PuBu')[module_size$quant[order(module_size$n)]])
+```
+
+The biggest modules have the most extreme memberships (both positive and negative)
+```{r heatmap_genes_modules_abs, fig.width=10, fig.height=10}
+plot_mm = plot_mm[order(rowMeans(abs(plot_mm))), module_size$Module[order(module_size$n)]]
+heatmap.2(abs(plot_mm), ColSideColors = brewer.pal(9,'PuBu')[module_size$quant[order(module_size$n)]], keysize=1, 
+          RowSideColors = brewer.pal(9, 'RdPu')[cut(rowMeans(plot_mm), breaks=9, labels=FALSE)],
+          trace='none', dendrogram='none', scale='none', Rowv=FALSE, Colv=FALSE, col=brewer.pal(9,'YlOrRd'))
+```
+
+Checking if the mean expression of the modules plays a role
+
+**Note:** The gray module is the one with the lowest mean level of expression of all the modules
+```{r heatmap_genes_modules_abs_wo_order, fig.width=10, fig.height=10}
+plot_mm = plot_mm[order(rowMeans(plot_mm)), module_size$Module[order(module_size$meanExpr)]]
+heatmap.2(plot_mm, ColSideColors = brewer.pal(9,'RdPu')[module_size$quantME[order(module_size$meanExpr)]], keysize=1, 
+          RowSideColors = brewer.pal(9, 'RdPu')[cut(rowMeans(plot_mm), breaks=9, labels=FALSE)],
+          trace='none', dendrogram='none', scale='none', Rowv=FALSE, Colv=FALSE, col=brewer.pal(9,'Spectral'))
+```
+
+```{r, fig.width=10, fig.height=10}
+plot_mm = plot_mm[order(rowMeans(plot_mm)), module_size$Module[order(module_size$meanExpr)]]
+heatmap.2(plot_mm, ColSideColors = brewer.pal(9,'RdPu')[module_size$quantME[order(module_size$meanExpr)]], keysize=1, 
+          RowSideColors = brewer.pal(9, 'RdPu')[cut(rowMeans(plot_mm), breaks=9, labels=FALSE)],
+          trace='none', dendrogram='none', scale='none', Rowv=TRUE, Colv=FALSE, col=brewer.pal(9,'Spectral'))
+```
+
+The mean expression pattern seems to be clearer in the samples than in the modules
+
+The colors in the histogram seem to have inverted, with the red being the highest MM and blue de lowest (I have no idea how this happened)
+
+
+```{r fig.width=10, fig.height=10}
+plot_mm = plot_mm[order(rowMeans(plot_mm)), module_size$Module[order(module_size$meanExpr)]]
+heatmap.2(plot_mm, ColSideColors = brewer.pal(9,'RdPu')[module_size$quantME[order(module_size$meanExpr)]], keysize=1, 
+          RowSideColors = brewer.pal(9, 'RdPu')[cut(rowMeans(plot_mm), breaks=9, labels=FALSE)],
+          trace='none', dendrogram='column', scale='none', col=brewer.pal(9,'Spectral'))
+```
+
+<br>
+
+### Behaviour differences between assigned module and module with maximum MM
+
+<br>
+
+#### Mean Expression by Gene and by Module
+
+Because of the weird inversion in the heatmap palette from above, check if there's a relation between the gene's level of expression and the average level of expression of the module it is assigned to: there is and it is positive, so something weird is happening in the heatmaps above
+
+I'm not sure how to compare these two plots ... 
+
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+plot_data = data.frame('ID' = dataset$ID, 'GeneMeanExpr'=rowMeans(datExpr), 'Module' = gsub('#','',dataset$Module)) %>%
+            left_join(module_size, by='Module') %>% mutate('ModuleMeanExpr' = meanExpr)
+
+MM_module_size = data.frame('Module' = original_max_membership) %>% group_by(Module) %>% tally()
+MM_module_size$meanExpr = sapply(MM_module_size$Module, function(m){mean(rowMeans(datExpr)[original_max_membership==m |
+                                                                                           original_max_membership==paste0('#',m)])})
+
+MM_plot_data = data.frame('ID' = dataset$ID, 'GeneMeanExpr'=rowMeans(datExpr), 'Module' = gsub('#','',dataset$Module)) %>%
+            left_join(MM_module_size, by='Module') %>% mutate('ModuleMeanExpr' = meanExpr)
+
+
+p1 = plot_data %>% ggplot(aes(ModuleMeanExpr, GeneMeanExpr)) + geom_point(alpha=0.2, color=gsub('#gray','gray',paste0('#',plot_data$Module))) + 
+                   geom_smooth(color='gray') + theme_minimal() + xlab('Assigned Module Mean Expression') + ylab('Gene Mean Expression') +
+                   ggtitle(paste0('Cor = ', round(cor(plot_data$ModuleMeanExpr, plot_data$GeneMeanExpr),3),
+                                  '  Regression slope = ', round(lm(GeneMeanExpr ~ ModuleMeanExpr, data=plot_data)$coefficients[[2]],2),
+                                  '  R^2 = ', round(cor(plot_data$ModuleMeanExpr, plot_data$GeneMeanExpr)^2,3)))
+
+p2 = MM_plot_data %>% ggplot(aes(ModuleMeanExpr, GeneMeanExpr)) + geom_point(alpha=0.2, color=gsub('#gray','gray',paste0('#',plot_data$Module))) + 
+                      geom_smooth(color='gray') + theme_minimal() + xlab('Highest MM Module Mean Expression') + ylab('Gene Mean Expression') +
+                      ggtitle(paste0('Cor = ', round(cor(MM_plot_data$ModuleMeanExpr, MM_plot_data$GeneMeanExpr),3),
+                                  '  Regression slope = ', round(lm(GeneMeanExpr ~ ModuleMeanExpr, data=MM_plot_data)$coefficients[[2]],2),
+                                  '  R^2 = ', round(cor(MM_plot_data$ModuleMeanExpr, MM_plot_data$GeneMeanExpr)^2,3)))
+
+grid.arrange(p1, p2, nrow = 1)
+
+rm(p1, p2)
+```
+
+Assigning genes by MM increases the mean expression of the largest modules and decreases the mean expression of the smallest ones
+```{r, warning=FALSE}
+plot_data = module_size %>% dplyr::select(Module, meanExpr, n) %>% rename(AssignedModuleME=meanExpr) %>%
+            left_join(MM_module_size, by='Module') %>% rename(MMModuleME=meanExpr)
+
+ggplotly(plot_data %>% ggplot(aes(AssignedModuleME, MMModuleME, size=n.x)) + geom_abline(slope=1, intercept=0, color='gray') +
+         geom_point(color=gsub('#gray','gray',paste0('#',plot_data$Module)), alpha=0.5, aes(id=Module)) + ggtitle('Mean Expression') + 
+         xlab('Mean Expression of Assigned Module') + ylab('Mean Expression of Module with Higest MM') + theme_minimal() + coord_fixed())
+
+```
+
+There doesn't seem to be a relation between module size and level of expression, so the result from above probably has no effect on the level of expression patterns found before
+```{r, message=FALSE}
+plot_data = module_size %>% dplyr::select(Module, meanExpr, n)
+
+ggplotly(plot_data %>% ggplot(aes(meanExpr, n)) + geom_point(color=gsub('#gray','gray',paste0('#',plot_data$Module))) + 
+         geom_smooth(color='gray', alpha=0.1) + theme_minimal())
+```
+
+To see if the strength of the relation between level of expression and assigned module (using the regular WGCNA assignment vs using the maximum MM), I'm going to fit a linear regression to these two module classifications and see which has a better performance.
+
+It seems like the maxMM Module assignment has a stronger relation with mean expression than the originally asigned Modules ... which would be bad, but I'm not sure how reliable this results are
+
+```{r}
+
+lm_data = data.frame('MeanExpr' = log2(rowMeans(datExpr)+1), 'MMModule' = as.factor(original_max_membership), 
+                     'assignedModule' = as.factor(gsub('#','',dataset$Module)))
+
+lm_MM = lm(MeanExpr ~ MMModule, data=lm_data[lm_data$MMModule!='gray',])
+lm_aM = lm(MeanExpr ~ assignedModule, data=lm_data[lm_data$assignedModule!='gray',])
+
+cat('Results using the maxMM Module:')
+summary(lm_MM)
+
+cat('Results using the assigned Module:')
+summary(lm_aM)
+```
+
+The models are quite similar
+```{r, warning=FALSE}
+coefs_MM = summary(lm_MM)$coefficients %>% data.frame %>% mutate('Module' = gsub('MMModule','',rownames(.)))
+coefs_aM = summary(lm_aM)$coefficients %>% data.frame %>% mutate('Module' = gsub('assignedModule','',gsub('#','',rownames(.))))
+
+plot_data = coefs_MM %>% left_join(coefs_aM, by='Module') %>% mutate('color'=ifelse(Module=='(Intercept)', 'gray', paste0('#',Module)))
+
+ggplotly(plot_data %>% ggplot(aes(Estimate.x, Estimate.y)) + geom_point(color=plot_data$color, aes(id=Module)) + 
+         geom_abline(slope=1, intercept=0, color='gray') + xlab('Estimate MM Model') + ylab('Estimate assignedModule Model') + 
+         theme_minimal() + ggtitle('Relation between coefficients'))
+
+```
+
+#### Module Size
+
+Assigning genes by MM balances more the size of the modules, increasing the smallest ones and reducing the largest ones. Mean expression doesn't seem to be a important factor here.
+
+```{r, warning=FALSE, message=FALSE}
+plot_data = module_size %>% dplyr::select(Module, meanExpr, n) %>% rename(AssignedModuleN=n) %>%
+            left_join(MM_module_size, by='Module') %>% rename(MMModuleN=n)
+
+ggplotly(plot_data %>% ggplot(aes(AssignedModuleN, MMModuleN, size=meanExpr.x)) + geom_abline(slope=1, intercept=0, color='gray') +
+         geom_smooth(color='gray', se=FALSE) + geom_point(color=gsub('#gray','gray',paste0('#',plot_data$Module)), alpha=0.5, aes(id=Module)) +
+         ggtitle('Module Size') + xlab('Size of Assigned Module') + ylab('Size of Module with Higest MM') + theme_minimal())
+```
+
+### Conclusion
+
+- The module assigned to each gene and the module with the highest Module Membership don't need to be the same and it's fine, it's because they are calculated with different methods
+
+- The biggest modules have the strongest MM values (both positive and negative)
+
+- There seems to be some relation between the mean level of expression of a gene and MM (this shouldn't happen...)
+
+- If we use maximum MM as a criteria for assigning modules, the resulting modules have more balanced sizes but it looks like the bias by level of expression gets stronger (although I'm not sure about how reliable these results are)
+
+<br><br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>

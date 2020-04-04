@@ -1,0 +1,368 @@
+---
+title: 'WGCNA maxMM Modules Exploratory Analysis'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
+library(expss)
+library(polycor)
+library(foreach) ; library(doParallel)
+suppressWarnings(suppressMessages(library(WGCNA)))
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+```
+
+Load preprocessed dataset (preprocessing code in 19_10_14_data_preprocessing.Rmd) and clustering (pipeline in 19_10_21_WGCNA.Rmd)
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/Gandal/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations
+GO_annotations = read.csv('./../../../PhD-InitialExperiments/FirstYearReview/Data/GO_annotations/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../Data/SFARI/SFARI_genes_08-29-2019_with_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Clusterings
+clusterings = read_csv('./../Data/Gandal/clusters.csv')
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+# Dataset created with DynamicTreeMerged algorithm
+clustering_selected = 'DynamicHybrid'
+dataset = read.csv(paste0('./../Data/Gandal/dataset_', clustering_selected, '.csv'))
+mm = dataset %>% dplyr::select(starts_with('MM.'), starts_with('MMgray')) %>% dplyr::rename(MM.gray = MMgray)
+rownames(mm) = dataset$ID
+
+# Assign gene to the module with the highest MM
+original_modules = dataset[,clustering_selected]
+mm_wo_gray = mm[,-which(colnames(mm)=='MM.gray')]
+genes_info$Module = gsub('MM.', '', colnames(mm_wo_gray)[max.col(mm_wo_gray, ties.method='first')])
+genes_info$Module = paste0('#', genes_info$Module)
+genes_info$Module[original_modules=='gray'] = 'gray'
+
+
+rm(DE_info, GO_annotations, clusterings, dds, GO_neuronal, dataset, mm, mm_wo_gray)
+```
+
+---
+
+# Max Module Memberhsip Modules
+
+*The colour of the modules is the arbitrary one assigned during the WGCNA algorithm, where the gray cluster actually represents all the genes that were left without a cluster (so it's not actually a cluster).
+
+The module sizes are more balanced than before.
+```{r dynamic_hybrid_module_count, fig.width=10}
+
+cat(paste0('The maxMM assignment created ', length(unique(genes_info$Module))-1, ' modules and left ',
+           sum(genes_info$Module=='gray'), ' genes without a module.\n'))
+
+table(genes_info$Module)
+
+plot_data = table(genes_info$Module) %>% data.frame %>% arrange(desc(Freq))
+
+ggplotly(plot_data %>% ggplot(aes(x=reorder(Var1, -Freq), y=Freq)) + geom_bar(stat='identity', fill=plot_data$Var1) + 
+         ggtitle('Module size') + ylab('Number of genes') + xlab('Module') + theme_minimal() + 
+         theme(axis.text.x = element_text(angle = 90)))
+```
+
+<br>
+
+## Relation to external clinical traits
+
+### Quantifying module-trait associations
+
+In the WGCNA documentation they use Pearson correlation to calculate correlations, I think all of their variables were continuous. Since I have categorical variables I'm going to use the `hetcor` function, that calculates Pearson, polyserial or polychoric correlations depending on the type of variables involved.
+
+- I'm not sure how the `corPvalueStudent` function calculates the p-values and I cannot find any documentation...
+
+- Compared correlations using Pearson correlation and with hetcor and they are very similar, but a bit more extreme with hetcor. The same thing happens with the p-values.
+
+```{r calc_module_trait_associations, message=FALSE, warning=FALSE}
+datTraits = datMeta %>% dplyr::select(Diagnosis_, Region, Sex, Age, PMI, RNAExtractionBatch) %>%
+            rename('Diagnosis' = Diagnosis_, 'ExtractionBatch' = RNAExtractionBatch)
+
+# Recalculate MEs with color labels
+ME_object = datExpr %>% t %>% moduleEigengenes(colors = genes_info$Module)
+MEs = orderMEs(ME_object$eigengenes)
+
+# Calculate correlation between eigengenes and the traits and their p-values
+moduleTraitCor = MEs %>% apply(2, function(x) hetcor(x, datTraits)$correlations[1,-1]) %>% t
+rownames(moduleTraitCor) = colnames(MEs)
+colnames(moduleTraitCor) = colnames(datTraits)
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nrow(datExpr))
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+# In case there are any NAs
+if(sum(!complete.cases(moduleTraitCor))>0){
+  print(paste0(sum(is.na(moduleTraitCor)),' correlation(s) could not be calculated'))
+}
+
+rm(ME_object)
+```
+
+**Note:** The correlation between Module #9B8EFF and Diagonsis is the one that cannot be calculated, weirdly enough, the thing that causes the error is that the initial correlation is too high, so it would be a very bad thing to lose this module because of this numerical error. I'm going to fill in its value using the polyserial function, which doesn't give exactly the same results as the hetcor() function, but it's quite similar.
+
+The sign of this module's eigengene is enough to classify 94% of the observations correctly! So even though the correlation that the polyserial function assign to it is a bit extreme (1), it makes sense
+
+```{r}
+
+plot_data = data.frame('ME' = MEs[,'ME#9B8EFF'], 'Diagnosis' = datTraits$Diagnosis)
+ggplotly(plot_data %>% ggplot(aes(Diagnosis, ME, fill=Diagnosis)) + geom_boxplot() + theme_minimal() + 
+         theme(legend.position='none') + ylab('ME vals for Module #9B8EFF'))
+
+table(sign(plot_data$ME), plot_data$Diagnosis)
+
+moduleTraitCor['ME#9B8EFF','Diagnosis'] = polyserial(MEs[,'ME#9B8EFF'], datTraits$Diagnosis)
+```
+
+Modules have very strong correlations with Diagnosis with really small p-values and not much relation with anything else. Perhaps a little with PMI and Brain Region.
+
+It's a good sign that the gray module has one of the lowest correlations with diagnosis, since we know its composed mainly of not differentially expressed genes.
+
+- The correlation between Diagonsis and the top modules is slightly lower than with the originally assigned modules (~1 percentual point lower)
+
+- The six modules with the strongest (absolute) correlation with Diagnosis are the same and they mantain the same order than with the originally assigned modules
+
+```{r plot_heatmap, fig.width=10, fig.height=10, warning=FALSE, message=FALSE}
+moduleTraitPvalue = moduleTraitPvalue[complete.cases(moduleTraitCor),]
+moduleTraitCor = moduleTraitCor[complete.cases(moduleTraitCor),]
+
+# Sort moduleTraitCor by Diagnosis
+moduleTraitCor = moduleTraitCor[order(moduleTraitCor[,1], decreasing=TRUE),]
+moduleTraitPvalue = moduleTraitPvalue[order(moduleTraitCor[,1], decreasing=TRUE),]
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', round(signif(moduleTraitPvalue, 1),6), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+
+labeledHeatmap(Matrix = moduleTraitCor, xLabels = names(datTraits), yLabels =  gsub('ME','',rownames(moduleTraitCor)), 
+               yColorWidth=0, colors = brewer.pal(11,'PiYG'), bg.lab.y = gsub('ME','',rownames(moduleTraitCor)),
+               textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.8, cex.lab.y = 0.75, zlim = c(-1,1),
+               main = paste('Module-Trait relationships'))
+
+diagnosis_cor = data.frame('Module' = gsub('ME','',rownames(moduleTraitCor)),
+                           'MTcor' = moduleTraitCor[,'Diagnosis'],
+                           'MTpval' = moduleTraitPvalue[,'Diagnosis'])
+
+genes_info = genes_info %>% left_join(diagnosis_cor, by='Module')
+
+rm(moduleTraitCor, moduleTraitPvalue, datTraits, textMatrix, diagnosis_cor)
+```
+
+Modules with a high Module-Diagnosis correlation should have a high content of differentially expressed genes
+
+- This pattern seems to have become stronger than before
+
+```{r MD_DE_genes, warning=FALSE}
+plot_data = genes_info %>% group_by(Module, MTcor) %>% summarise(p = 100*mean(significant))
+
+plot_data %>% ggplot(aes(MTcor, p)) + geom_hline(yintercept=mean(plot_data$p), color='gray', linetype='dotted') +
+         geom_point(color=plot_data$Module, aes(id=Module)) + theme_minimal() + 
+         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('Percentage of differentially expressed genes')
+```
+
+<br>
+
+## Gene Significance and Module Membership
+
+**Gene significance:** is the value between the correlation between the gene and the trait we are interested in. A positive gene significance means the gene is overexpressed and a negative value means its underexpressed. (The term 'significance' is not very acurate because it's not actually measuring statistical significance, it's just a correlation, but that's how they call it in WGCNA...)
+
+**Module Membership** is the correlation of the module's eigengene and the expression profile of a gene. The higher the Module Membership, the more similar the gene is to the genes that constitute the module. (I won't use this measure yet)
+
+```{r module_membership}
+dataset = read.csv(paste0('./../Data/Gandal/dataset_', clustering_selected, '.csv'))
+# dataset$Module = dataset[,clustering_selected] # To avoid any confusion afterwards
+```
+
+<br>
+
+## Analysing concordance between these metrics in the genes
+
+<br>
+
+### 1. Gene Significance vs Log Fold Change
+
+Gene significance and Log Fold Chance are two different ways to measure the same thing, so there should be a concordance between them
+
+Log Fold Chance has some really big outliers, but both variables agree with each other quite well
+
+- The values of this plot don't change at all, just the module assignment of the points
+
+```{r GS_lfc, warning=FALSE, message=FALSE}
+plot_data = dataset %>% dplyr::select(ID, GS) %>% left_join(genes_info %>% dplyr::select(ID, gene.score), by='ID') %>%
+            left_join(genes_info %>% dplyr::select(ID, baseMean, log2FoldChange, significant, MTcor, Module), by='ID') %>%
+            left_join(data.frame(MTcor=unique(genes_info$MTcor)) %>% arrange(by=MTcor) %>% 
+                                 mutate(order=1:length(unique(genes_info$MTcor))), by='MTcor')
+
+ggplotly(plot_data %>% ggplot(aes(GS, log2FoldChange)) + geom_point(color=plot_data$Module, alpha=0.5, aes(ID=Module)) + 
+         geom_smooth(color='gray') + theme_minimal() + xlab('Gene Significance') + 
+         ggtitle(paste0('Correlation = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1], 4))))
+```
+
+<br>
+
+### 2. Module-Diagnosis correlation vs Gene Significance
+
+In general, modules with the highest Module-Diagnosis correlation should have genes with high Gene Significance
+
+**Note:** For the Module-Diagnosis plots, if you do boxplots, you lose the exact module-diagnosis correlation and you only keep the order, so I decided to compensate this downside with a second plot, where each point is plotted individually using their module's Module-Diagnosis correlation as the x axis. I think the boxplot plot is easier to understand but the second plot contains more information, so I don't know which one is better.
+
+- Maybe it now looks less noisy? the difference is not that much
+
+- The R^2 increased 0.06, from 0.6592 to 0.7235, it's not much, but it's good
+```{r MD_GS_boxplot, fig.width=10}
+plot_data = plot_data %>% arrange(order)
+
+ggplotly(plot_data %>% ggplot(aes(order, GS, group=order)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
+         geom_boxplot(fill=unique(plot_data$Module)) + theme_minimal() + 
+         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('Gene Significance'))
+```
+
+```{r MD_GS_points, fig.width=10, warning=FALSE, message=FALSE}
+plot_data %>% ggplot(aes(MTcor, GS)) + geom_hline(yintercept=0, color='gray', linetype='dotted') + 
+         geom_point(color=plot_data$Module, alpha=0.1, aes(id=ID)) + geom_smooth(color='gray', alpha=0.3) + 
+         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('Gene Significance') + 
+         ggtitle(paste0('R^2=',round(cor(plot_data$MTcor, plot_data$GS)^2,4)))
+```
+
+### 3. Module-Diagnosis correlation vs Log Fold Change
+
+The same should happen with the Log Fold Change
+
+- This plot doesn't change much with the change of module assignment criteria
+
+- The R^2 value increases again, this time from 0.2062 to 0.2234 (increase of 0.017)
+```{r MD_LFC_boxplot, fig.width=10, warning=FALSE, message=FALSE}
+ggplotly(plot_data %>% ggplot(aes(order, log2FoldChange, group=order)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
+         geom_boxplot(fill=unique(plot_data$Module)) + 
+         theme_minimal() + xlab('Modules ordered by Module-Diagnosis correlation') + ylab('log2FoldChange'))
+```
+
+```{r MD_LFC_points, fig.width=10, warning=FALSE, message=FALSE}
+ggplotly(plot_data %>% ggplot(aes(MTcor, log2FoldChange)) + geom_hline(yintercept=0, color='gray', linetype='dotted') +
+         geom_point(color=plot_data$Module, alpha=0.1, aes(id=ID)) + geom_smooth(color='gray', alpha=0.3) + 
+         theme_minimal() + xlab('Module-Diagnosis correlation') + ylab('log2FoldChange') + 
+         ggtitle(paste0('R^2=',round(cor(plot_data$MTcor, plot_data$log2FoldChange)^2,4))))
+```
+
+<br>
+
+### 4. Module-Diagnosis vs Mean Expression
+
+In theory, there shouldn't be a relation between module-diagnosis and mean expression, but in the the exploratory analysis, we saw that the overexpressed genes tended to have lower levels of expression than the overexpressed genes, and this pattern can be seen in these plots where the modules with negative Module-Diagonsis correlation have slightly higher levels of expression than the modules with positive Module-Diagnosis correlation, although this pattern is note very strong and all modules have similar levels of expression.
+
+- There is not a noticeable difference in this plot, but the R^2 increased, again, from 0.0302 to 0.0418 (0.012)
+
+```{r MD_ME_boxplot, fig.width=10, warning=FALSE, message=FALSE}
+ggplotly(plot_data %>% ggplot(aes(order, log2(baseMean+1), group=order)) + 
+         geom_hline(yintercept=mean(log2(plot_data$baseMean+1)), color='gray', linetype='dotted') +
+         geom_boxplot(fill=unique(plot_data$Module)) + theme_minimal() + 
+         xlab('Modules ordered by Module-Diagnosis correlation') + ylab('log2(Mean Expression)'))
+```
+
+```{r MD_ME_points, fig.width=10, warning=FALSE, message=FALSE}
+plot_data %>% ggplot(aes(MTcor, log2(baseMean+1))) + geom_point(alpha=0.2, color=plot_data$Module, aes(id=ID)) + 
+         geom_hline(yintercept=mean(log2(plot_data$baseMean+1)), color='gray', linetype='dotted') + 
+         geom_smooth(color='gray', alpha=0.3) + theme_minimal() + xlab('Module-Diagnosis correlation') +
+         ggtitle(paste0('R^2=',round(cor(plot_data$MTcor, log2(plot_data$baseMean+1))^2,4)))
+```
+
+### Conclusion:
+
+All of the variables seem to agree with each other, Modules with a high correlation with Diagnosis tend to have genes with high values of Log Fold Change as well as high values of Gene Significance, and the gray module, which groups all the genes that weren't assigned to any cluster tends to have a very poor performance in all of the metrics.
+
+The correlation between Module assignment and Diagnosis is a bit weaker than before, but I don't think the difference is very big (~1 percentual point)
+
+There is no significant difference in the concordance between the different variables, but the R^2 value consistently increases with these new Modules (although again, the difference is not big)
+
+Until here, the method used to assign a module to a gene doesn't seem to have a big impact in the general behaviour of the clusters, and as Peter Langfelder says, perhaps we should worry too much about it
+
+<br><br>
+
+## SFARI Scores
+
+Since SFARI scores genes depending on the strength of the evidence linking it to the development of autism, in theory, there should be some concordance between the metrics we have been studying above and these scores...
+
+### SFARI Scores vs Gene Significance
+
+- SFARI scores 1 to 5 have a lower median than all genes that have a neuronal-related annotation <span style="color:red">(!)</span>
+
+- The group with the highest Gene Significance is SFARI score 6, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:red">(!)</span>
+
+- SFARI score 1 is the group with the lowest Gene Significance, with a (slightly) lower median than the genes without any type of Neuronal annotation <span style="color:red">(!)</span>
+
+- Neuronal annotated genes have higher Gene Significance than genes without any neuronal-related annotation (makes sense)
+
+- This plot doesn't depend on the assigned module, so there's no difference between the different module assignment criteria
+
+```{r SFARI_GS, fig.width=10, warning=FALSE, message=FALSE}
+ggplotly(plot_data %>% ggplot(aes(gene.score, abs(GS), fill=gene.score)) + geom_boxplot() + 
+         scale_fill_manual(values=SFARI_colour_hue(r=c(1:6,8,7))) + theme_minimal() + 
+         ylab('abs(Gene Significance)') + xlab('SFARI Scores') + theme(legend.position='none'))
+```
+
+### SFARI Scores vs Module-Diagnosis correlation
+
+- The higher the SFARI score, the lower the Module-Trait correlation <span style="color:red">(!)</span>
+
+- SFARI scores 1 and 2 have significantly lower values of Module-Trait correlation than the rest of the groups <span style="color:red">(!)</span>
+
+- The group with the highest Module-Diagnosis correlation is SFARI score 6, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:red">(!)</span>
+
+- SFARI score 1 is the group with the lowest Module-Diagonsis correlation, with a median equal to the first quartile of the genes without any type of Neuronal annotation <span style="color:red">(!)</span>
+
+- This pattern is a lot easier to recognise with this module assignment criteria <span style="color:red">(!!!)</span>, reducing (even more) the module-trait correlation distribution of genes with score 1. This is bad for the model...
+
+```{r SFARI_MD, fig.width=10, warning=FALSE, message=FALSE}
+ggplotly(plot_data %>% ggplot(aes(gene.score, abs(MTcor), fill=gene.score)) + geom_boxplot() + 
+         scale_fill_manual(values=SFARI_colour_hue(r=c(1:6,8,7))) + theme_minimal() + 
+         ylab('abs(Module-Trait Correlation)') + xlab('SFARI Scores') + theme(legend.position='none'))
+```
+
+### Conclusion:
+
+Not only are SFARI genes not consistent with the other measurements, but they seem to strongly contradict them. There is a big difference between all the metrics created from gene expression analysis and these scores.
+
+The problems by SFARI score seem to be stronger here than with the original module assignment <span style="color:red">(!)</span>
+
+Including the SFARI information, the differences between the both module assignment criteria seem to be stronger, the maxMM criteria increases the hegative bias between SFARI score and the other metrics relating genes to autism, but I don't know if it's bad or if it's actually good because we already know this is an underlying pattern in our data, so the fact that this module assignment allows us to see it clearer means the modules are cleaner??? :/
+
+<br><br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>

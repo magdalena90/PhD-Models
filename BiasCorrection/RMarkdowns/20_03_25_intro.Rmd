@@ -1,0 +1,297 @@
+---
+title: 'Introduction'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+
+library(tidyverse)
+library(knitr)
+library(plotly) ; library(viridis) ; library(gridExtra) ; library(RColorBrewer)
+library(Rtsne)
+library(knitr)
+library(ROCR)
+library(expss)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+```
+
+<br>
+
+## Original Model
+
+<br>
+
+In Models/InitialExperiments/19_10_22_logistic_regression.html we trained the first Logistic Regression model to infer if a gene is related to ASD based on the SFARI scores
+
+- Each gene was represented as an observation
+
+- Each observation was characterised by a feature vector consisting of the gene's Module Membership (MM) to each module obtained from WGCNA (MM=correlation to the module's first eigengene), and its Gene Significance (GS) (GS=correlation betwen the level of expression of the gene through all of its samples and the Diagnosis of the samples)
+
+- Each observation was assigned a binary label indicating if the gene was included in the SFARI dataset (TRUE) or not (FALSE)
+
+<br>
+
+To simplify the model:
+
+- Random subsampling was made to balance the two classes (using only 330 observations)
+
+- There was no feature selection (using MM from all modules)
+
+- The model didn't include any type of regularisation (out of the box LR)
+
+<br>
+
+### Results
+
+<br>
+
+The model seems to work relatively well
+
+```{r, warning=FALSE, message=FALSE}
+# Regression data
+load(file='./../../InitialExperiments/Data/Gandal/logreg_model.RData')
+
+# Mean Expression data
+load('./../../InitialExperiments/Data/Gandal/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+# Dataset created with DynamicTreeMerged algorithm
+clustering_selected = 'DynamicHybridMergedSmall'
+original_dataset = read.csv(paste0('./..//../InitialExperiments/Data/Gandal/dataset_', clustering_selected, '.csv'), row.names=1)
+
+rm(dds, datGenes, datMeta)
+```
+
+**Accuracy:**
+
+```{r}
+acc = mean(test_set$SFARI==test_set$pred)
+
+print(paste0('Accuracy = ', round(acc,4)))
+```
+
+<br><br>
+
+**Confusion Matrix:**
+
+```{r}
+conf_mat = test_set %>% apply_labels(SFARI = 'Actual Labels', 
+                                     prob = 'Assigned Probability', 
+                                     pred = 'Label Prediction')
+
+cro(conf_mat$SFARI, list(conf_mat$pred, total()))
+```
+
+<br><br>
+
+**ROC Curve:**
+
+```{r}
+pred_ROCR = prediction(test_set$prob, test_set$SFARI)
+
+roc_ROCR = performance(pred_ROCR, measure='tpr', x.measure='fpr')
+AUC = performance(pred_ROCR, measure='auc')@y.values[[1]]
+
+plot(roc_ROCR, main=paste0('ROC curve (AUC=',round(AUC,2),')'), col='#009999')
+abline(a=0, b=1, col='#666666')
+```
+<br><br>
+
+**Lift Curve:**
+
+```{r}
+lift_ROCR = performance(pred_ROCR, measure='lift', x.measure='rpp')
+plot(lift_ROCR, main='Lift curve', col='#86b300')
+```
+
+<br><br>
+
+**Probability distribution by SFARI Score:**
+
+Even though our objective variable was binary, only indicating if the gene was included in the SFARI dataset or not, the higher SFARI scores are assigned higher probabilities by the model than lower scores, and all of the SFARI scores except 6 have a much higher distribution of probabilities than the genes without a score (the ones that are not included in the SFARI dataset)
+
+```{r}
+plot_data = test_set %>% mutate(ID=rownames(test_set)) %>% dplyr::select(ID, prob) %>%
+            left_join(original_dataset %>% mutate(ID=rownames(original_dataset)), by='ID') %>%
+            dplyr::select(ID, prob, gene.score) %>% apply_labels(gene.score='SFARI Gene score')
+
+ggplotly(plot_data %>% ggplot(aes(gene.score, prob, fill=gene.score)) + geom_boxplot() + 
+              scale_fill_manual(values=SFARI_colour_hue(r=c(1:7))) + 
+              ggtitle('Distribution of probabilities by SFARI score') +
+              xlab('SFARI score') + ylab('LR Probability') + theme_minimal())
+```
+
+```{r}
+rm(conf_mat, lift_ROCR, pred_ROCR, roc_ROCR, acc, AUC, plot_data)
+```
+<br><br>
+
+### Bias
+
+<br>
+
+There is a positive correltion between the probability assigned to each gene by the model and the mean expression of the gene
+
+This is a problem because we had previously discovered a bias in the SFARI scores related to mean level of expression, which means that this could be a confounding factor in our model and the reason why it seems to perform well
+
+```{r, warning=FALSE}
+plot_data = data.frame('ID'=rownames(datExpr), 'meanExpr'=rowMeans(datExpr)) %>% 
+            right_join(negative_set %>% mutate(ID=rownames(negative_set)), by='ID')
+
+plot_data %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.1, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.3) + 
+              geom_smooth(method='lm', color='#999999', se=FALSE, alpha=1) + 
+              xlab('Mean Expression') + ylab('LR Probability') +
+              theme_minimal() + ggtitle('Mean expression vs model score by gene')
+```
+
+<br><br>
+
+### True Signal
+
+<br>
+
+We know the probabilities assigned by the model are biased by the level of expression, but we would like to know if the model is being able to capture any biological significance appart from this or if it's completely useless
+
+Since we know the LFC has a **negative** correlation with mean expression, the fact that the model's probability and the genes's |LFC| have a **positive** correlation, suggests that the model is actually capturing some biological signal, and that it is strong enough to invert the relation it would have had to |LFC| if it was only capturing level of expression
+
+This means that if we manage to remove the level of expression bias from the model, we may obtain a useful model that captures true biological signal
+
+- The LFC was transformed because it had very big outliers that didn't let us see the behaviour of the main group of genes clearly
+
+- It's interesting that the relation is specially strong in genes with a negative LFC (genes underexpressed in ASD)
+
+- The trend curves downward on the edges of the plot, but the error bars are very wide in those regions, so it could be just the influence of a few points and not a significant pattern
+
+```{r fig.width=10}
+plot_data = negative_set %>% mutate(ID=rownames(negative_set)) %>% 
+            left_join(DE_info %>% mutate(ID=rownames(DE_info)), by='ID') %>%
+            mutate('significant' = padj<0.05, lfc = sign(log2FoldChange)*sqrt(abs(log2FoldChange)))
+
+p = plot_data %>% filter(abs(log2FoldChange)<10) %>%
+                  ggplot(aes(lfc, prob)) + geom_point(alpha=0.1, color='#0099cc') + 
+                  geom_smooth(method='loess', color='gray', alpha=0.3) + 
+                  xlab('sqrt(LFC)') + ylab('LR Probability') +
+                  theme_minimal() + ggtitle('LFC vs model probability by gene')
+ggExtra::ggMarginal(p, type = 'density', color='gray', fill='gray', size=10)
+```
+
+Repeating the same plot as above but separating the genes by statistical significance
+
+- That the statistical significant genes with a negative LFC are the ones with the strongest correlation to the probability
+
+- The genes found to have a statistical significant DE are assigned slightly higher probabilities by the model (right hand side density plot)
+
+```{r fig.width=10}
+p = plot_data %>% filter(abs(log2FoldChange)<10) %>%
+                  ggplot(aes(lfc, prob, color=significant)) + geom_point(alpha=0.1) + 
+                  geom_smooth(method='loess', alpha=0.3) + 
+                  xlab('sqrt(LFC)') + ylab('LR Probability') +
+                  theme_minimal() + ggtitle('LFC vs model probability by gene') +
+                  theme(legend.position = 'bottom')
+ggExtra::ggMarginal(p, type = 'density', groupColour = TRUE, groupFill = TRUE, size=10)
+```
+
+<br><br>
+
+***
+
+<br>
+
+## Solutions to Bias Problem
+
+<br>
+
+This section is based on the paper [Identifying and Correcting Label Bias in Machine Learning](https://arxiv.org/pdf/1901.04966.pdf)
+
+<br>
+
+Work in fair classification can be categorised into three approaches:
+
+<br><br>
+
+#### 1. Post-processing Approach
+
+<br>
+
+After the model has been trained with the bias, perform a post-processing of the classifier outputs. This approach is quite simple to implement but has some downsides:
+
+- It has limited flexibility
+
+- Decoupling the training and calibration can lead to models with poor accuracy tradeoff (when training your model it may be focusing on the bias, in our case mean expression, and overlooking more important aspects of your data, such as biological significance)
+
+**Note:** My original attempt to remove the bias was using this approach, it seemed to work well, but I believe a big part of the predictive power of the model was wasted in capturing the mean expression signal so another approach could have a better performance. (PENDING: Create markdown with this approach)
+
+<br><br>
+
+#### 2. Lagrangian Approach
+
+<br>
+
+Transforming the problem into a constrained optimisation problem (fairness as the constraint) using Lagrange multipliers.
+
+Some of the downsides of this approach are:
+
+- The fairness constraints are often irregular and have to be relaxed in order to optimise
+
+- Training can be difficult, the Lagrangian may not even have a solution to converge to
+
+- Constrained optimisation can be inherently unstable
+
+- It can overfit and have poor fairness generalisation 
+
+- According to the paper, it often yields poor trade-offs in fairness and accuracy
+
+**Note:** It seems quite complicated and has many downsides, so I'm not going to implement this approach
+
+<br><br>
+
+#### 3. Pre-processing Approach
+
+<br>
+
+These approaches primarily involve "massaging" the data to remove bias.
+
+Some downsides are:
+
+- These approaches typically do not perform as well as the state-of-art and come with few theoretical guarantees
+
+**Note:** I implemented a version of this approach when I tried to remove the level of expression signal from the dataset (the Module Membership features capture the bias in an indirect way), but I never finished this method (PENDING: Create markdown with this method)
+
+<br><br>
+
+### New Method proposed by the paper
+
+<br>
+
+They introduce a new mathematical framework for fairness in which we assume that there exists an *unknown* but *unbiased* group truth label function and that the labels observed in the data are assigned by an agent who is possibly biased, but otherwise has the intention of being accurate
+
+Assigning appropriate weights to each sample in the training data and iteratively training a classifier with the new weighted samples leads to an unbiased classifier on the original un-weighted dataset that simultaneously minimises the weighted loss and maximises fairness
+
+Advantages:
+
+- This approach works also on settings where both the features and the labels are biased
+
+- It can be used with many ML algorithms
+
+- It can be applied to many notions of fairness
+
+- It doesn't have strict assumptions about the behaviour of the data or the labels
+
+- According to the paper, it's fast and robust
+
+- According to the paper, it consistently leads to fairer classifiers, as well as a better or comparative predictive error than the other methods
+
+<br>
+
+Also, this is not important, but I though it was interesting: Since the algorithm simultaneously minimises the weighted loss and maximises fairness via learning the coefficients, it may be interpreted as competing goals with different objective functions, this, it's a form of a non-zero-sum two-player game
+
+**Note:** Pending implementation
+
+<br><br>
