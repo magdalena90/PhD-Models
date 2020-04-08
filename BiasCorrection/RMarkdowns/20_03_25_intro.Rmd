@@ -294,4 +294,17 @@ Also, this is not important, but I though it was interesting: Since the algorith
 
 **Note:** Pending implementation
 
+
+<br><br>
+
+***
+
+<br>
+
+## Dataset
+
+<br>
+
+I don't have a final preprocessing pipeline yet, but to work on both problems in parallel, I'm going to use the dataset obtained from the preprocessing pipeline from Preprocessing/Gandal/AllRegions/RMarkdowns/20_02_27_*.html, which has been copied to the Data folder in the BiasCorrection folder.
+
 <br><br>

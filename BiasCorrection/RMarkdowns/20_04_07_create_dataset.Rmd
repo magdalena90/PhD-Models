@@ -1,0 +1,253 @@
+---
+title: 'Create Dataset'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally)
+suppressWarnings(suppressMessages(library(WGCNA)))
+library(expss) ; library(knitr)
+library(polycor)
+library(foreach) ; library(doParallel)
+```
+
+### Dataset
+
+<br>
+
+The dataset corresponds to the processing pipeline found in Preprocessing/Gandal/AllRegions/RMarkdowns/20_02_27_*.html, which has been copied to the Data folder in the BiasCorrection folder
+
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+
+# GO Neuronal annotations
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../Data/SFARI_genes_08-29-2019_with_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Clusterings
+clusterings = read_csv('./../Data/clusters.csv')
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=rownames(.)) %>% left_join(SFARI_genes, by='ID') %>% 
+  mutate(`gene-score`=ifelse(is.na(`gene-score`), 'None', `gene-score`)) %>%
+  left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
+  mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+  mutate(gene.score=ifelse(`gene-score`=='None' & Neuronal==1, 'Neuronal', `gene-score`), 
+         significant=padj<0.05 & !is.na(padj))
+
+
+rm(DE_info, GO_annotations, dds)
+```
+
+The clusterings files include the modules obtained from WGCNA with many parameters. In previous experiments (Preprocessing/Gandal/AllRegions/RMarkdowns/20_02_27_WGCNA_modules_EA.html) we found Dynamic Hybrid to be the best option, so that's the clustering we are going to use here as well.
+
+- I'm going to use a version of the Dynamic Hybrid algorithm where similar modules have been merged together to have a simpler model with less parameters
+
+```{r select_clustering_method}
+clustering_selected = 'DynamicHybridMergedSmall'
+genes_info$Module = genes_info[,clustering_selected]
+```
+
+---
+
+# Exploratory Analysis of modules
+
+## Relate modules to external clinical traits
+
+### Quantifying module-trait associations
+
+In the WGCNA documentation they use Pearson correlation to calculate correlations, I think all of their variables were continuous. Since I have categorical variables I'm going to use the `hetcor` function, that calculates Pearson, polyserial or polychoric correlations depending on the type of variables involved.
+
+- I'm not sure how the corPvalueStudent function calculates the p-values and I cannot find any documentation...
+
+- Compared correlations using Pearson correlation and with hetcor and they are very similar, but a bit more extreme with hetcor. The same thing happens with the p-values.
+
+```{r calc_module_trait_associations}
+datTraits = datMeta %>% dplyr::select(Diagnosis, Region, Sex, Age, PMI, RNAExtractionBatch) %>%
+            dplyr::rename('ExtractionBatch' = RNAExtractionBatch)
+
+# Recalculate MEs with color labels
+ME_object = datExpr %>% t %>% moduleEigengenes(colors = genes_info[,clustering_selected])
+MEs = orderMEs(ME_object$eigengenes)
+
+# Calculate correlation between eigengenes and the traits and their p-values
+moduleTraitCor = MEs %>% apply(2, function(x) hetcor(x, datTraits, ML=TRUE)$correlations[1,-1]) %>% t
+rownames(moduleTraitCor) = colnames(MEs)
+colnames(moduleTraitCor) = colnames(datTraits)
+
+# In case there are any NAs
+if(sum(!complete.cases(moduleTraitCor))>0){
+  print(paste0(sum(is.na(moduleTraitCor)),' correlation(s) could not be calculated')) 
+  
+  # Calculate the correlation tha failed with hetcor()
+  missing_modules = rownames(moduleTraitCor)[is.na(moduleTraitCor[,1])]
+  
+  for(m in missing_modules){
+    cat(paste0('Correcting Module-Diagnosis correlation for Module ', m))
+    moduleTraitCor[m,'Diagnosis'] = polyserial(MEs[,m], datTraits$Diagnosis)
+  }
+}
+
+# Calculate p-values
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nrow(datExpr))
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+rm(ME_object)
+```
+
+<!-- **Note:** The correlations between Modules and Diagonsis that cannot be calculated, weirdly enough, is because the initial correlation is too high, so it would be a very bad thing to lose these modules because of this numerical error. I’m going to fill in the values using the polyserial function, which doesn’t give exactly the same results as the hetcor() function, but it’s quite similar. -->
+
+Modules have very strong correlations with Diagnosis and not much else
+
+```{r plot_heatmap, fig.width=10, fig.height=8}
+# Sort moduleTraitCor by Diagnosis
+moduleTraitCor = moduleTraitCor[order(moduleTraitCor[,1], decreasing=TRUE),]
+moduleTraitPvalue = moduleTraitPvalue[order(moduleTraitCor[,1], decreasing=TRUE),]
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+
+labeledHeatmap(Matrix = moduleTraitCor, xLabels = names(datTraits), yLabels =  gsub('ME','',rownames(moduleTraitCor)), 
+               yColorWidth=0, colors = brewer.pal(11,'PiYG'), bg.lab.y = gsub('ME','',rownames(moduleTraitCor)),
+               textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.8, cex.lab.y = 0.75, zlim = c(-1,1),
+               main = paste('Module-Trait relationships'))
+```
+
+```{r, warning=FALSE}
+diagnosis_cor = data.frame('Module' = gsub('ME','',rownames(moduleTraitCor)),
+                           'MTcor' = moduleTraitCor[,'Diagnosis'],
+                           'MTpval' = moduleTraitPvalue[,'Diagnosis'])
+
+genes_info = genes_info %>% left_join(diagnosis_cor, by='Module')
+
+rm(moduleTraitCor, moduleTraitPvalue, datTraits, textMatrix, diagnosis_cor)
+```
+
+## Gene Significance and Module Membership
+
+<br>
+
+This is the information that will be included into the model
+
+- **Gene significance:** absolute value between the correlation between the gene and the trait we are interested in
+
+- **Module membership:** Correlation of the module eigengene and the gene expression profile
+
+```{r gene_significance_and_module_membership, warning=FALSE, message=FALSE}
+# It's more efficient to iterate the correlations one by one, otherwise it calculates correlations between the eigengenes and also between the genes, which we don't need
+
+# Check if MM information already exists and if not, calculate it
+if(file.exists(paste0('./../Data/dataset_', clustering_selected, '.csv'))){
+  
+  dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'))
+  dataset$Module = dataset[,clustering_selected]
+  
+} else {
+  
+  ############# 1. Calculate Gene Significance
+  GS_info = data.frame('ID' = rownames(datExpr),
+                       'GS' = datExpr %>% apply(1, function(x) hetcor(x, datMeta$Diagnosis)$correlations[1,2])) %>%
+            mutate('GSpval' = corPvalueStudent(GS, ncol(datExpr)))
+  
+  #############  2. Calculate Module Membership
+  
+  #setup parallel backend to use many processors
+  cores = detectCores()
+  cl = makeCluster(cores-1)
+  registerDoParallel(cl)
+  
+  # Create matrix with MM by gene
+  MM = foreach(i=1:nrow(datExpr), .combine=rbind) %dopar% {
+    library(polycor)
+    tempMatrix = apply(MEs, 2, function(x) hetcor(as.numeric(datExpr[i,]), x)$correlations[1,2])
+    tempMatrix
+  }
+  
+  # Stop clusters
+  stopCluster(cl)
+  
+  rownames(MM) = rownames(datExpr)
+  colnames(MM) = paste0('MM',gsub('ME','',colnames(MEs)))
+  
+  # Calculate p-values
+  MMpval = MM %>% corPvalueStudent(ncol(datExpr)) %>% as.data.frame
+  colnames(MMpval) = paste0('MMpval', gsub('ME','',colnames(MEs)))
+  
+  MM = MM %>% as.data.frame %>% mutate(ID = rownames(.))
+  MMpval = MMpval %>% as.data.frame %>% mutate(ID = rownames(.))
+  
+  # Join and save results
+  dataset = genes_info %>% dplyr::select(ID, `gene-score`, clustering_selected, MTcor, MTpval) %>%
+            left_join(GS_info, by='ID') %>%
+            left_join(MM, by='ID') %>%
+            left_join(MMpval, by='ID')
+  
+  write.csv(dataset, file = paste0('./../Data/dataset_', clustering_selected, '.csv'), row.names = FALSE)
+  
+  rm(cores, cl) 
+  
+}
+
+GS_missing = dataset$ID[is.na(dataset$GS)] %>% as.character
+
+if(length(GS_missing)>0){
+  
+  print(paste0(length(GS_missing),' correlations between genes and Diagnosis could not be calculated, ',
+               'calculating them with the polyserial function'))
+  
+  for(g in GS_missing){
+    dataset$GS[dataset$ID == g] = polyserial(as.numeric(datExpr[g,]), datMeta$Diagnosis)
+  }
+  
+}
+
+rm(GS_missing)
+
+```
+
+--- 
+
+# Create and save dataset
+
+```{r create_dataset, warning=FALSE}
+dataset = dataset %>% dplyr::select(-matches(clustering_selected))
+
+dataset %>% head(5) %>% t %>% kable(caption = '(Transposed) features and their values for the first rows of dataset')
+
+write.csv(dataset, file = paste0('./../Data/dataset_', clustering_selected, '.csv'), row.names = FALSE)
+```
+<br><br>
+
+---
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>

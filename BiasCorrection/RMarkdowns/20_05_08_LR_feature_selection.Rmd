@@ -1,0 +1,600 @@
+---
+title: 'Logistic Regression with Feature Selection'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+
+library(tidyverse)
+library(knitr)
+library(plotly) ; library(viridis) ; library(gridExtra) ; library(RColorBrewer)
+library(biomaRt)
+library(Rtsne)
+library(knitr)
+library(ROCR)
+library(expss)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+```
+
+## Load and prepare data
+
+<br>
+Load dataset (preprocessing code in 20_04_07_create_dataset.html)
+```{r selecting_clustering}
+
+clustering_selected = 'DynamicHybridMergedSmall'
+print(paste0('Using clustering ', clustering_selected))
+
+# Dataset created with DynamicTreeMerged algorithm
+dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'), row.names=1)
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=rownames(dataset), mart=mart)
+
+rm(getinfo, mart)
+```
+
+#### Gene filtering:
+
+<br>
+
+- Remove genes without cluster (Module=gray)
+
+```{r}
+rm_cluster = dataset[is.na(dataset$MTcor),'Module'] %>% unique %>% as.character
+
+print(paste0('Removing ', sum(dataset$Module=='gray'), ' genes without cluster'))
+
+new_dataset = dataset %>% filter(Module != 'gray' & !is.na(MTcor))
+```
+
+#### Variable changes:
+
+<br>
+
+- Using Module Membership variables instead of binary module membership
+
+- Not including p-value variables
+
+- Including a new variable with the absolute value of GS
+
+- Removing information from gray module (unclassified genes)
+
+- Objective variable: Binary label indicating if it's in the SFARI dataset or not
+
+```{r}
+new_dataset = new_dataset %>% dplyr::select(-c(matches(paste('pval|Module')), MMgray)) %>%
+              mutate('absGS'=abs(GS), 'SFARI'=ifelse(gene.score=='None', FALSE, TRUE)) %>%
+              dplyr::select(-gene.score)
+
+rownames(new_dataset) = rownames(dataset)[dataset$Module != 'gray']
+
+rm(rm_cluster)
+```
+
+```{r}
+original_dataset = dataset
+dataset = new_dataset
+print(paste0('The final dataset contains ', nrow(dataset), ' observations and ', ncol(dataset), ' variables'))
+
+rm(new_dataset)
+```
+
+Sample of the dataset (transposed so it's easier to see)
+```{r}
+dataset %>% head(5) %>% t %>% kable
+```
+
+Objective variable distribution: Unbalanced labels
+```{r}
+print(table(dataset$SFARI))
+
+cat(paste0('\n',round(mean(dataset$SFARI)*100,2), '% of the observations are positive'))
+```
+
+---
+
+## Visualisations
+
+### Visualising the variables
+
+Chose the t-SNE algorithm because it preserves distances
+
+The SFARI labels is still close to the absolute value of Gene Significance. This time the MM variables seem to be grouped in 2 clusters
+```{r tsne_variables, warning=FALSE}
+tsne = dataset %>% t %>% Rtsne(perplexity=10)
+
+plot_data = data.frame('ID'=colnames(dataset), 'C1'=tsne$Y[,1], 'C2'=tsne$Y[,2],
+                       type=ifelse(grepl('MM', colnames(dataset)),'ModMembership',
+                            ifelse(grepl('SFARI', colnames(dataset)), 'SFARI',
+                            ifelse(grepl('GS', colnames(dataset)), 'GS', 'MTcor'))))
+
+ggplotly(plot_data %>% ggplot(aes(C1, C2, color=type)) + geom_point(aes(id=ID)) + 
+         theme_minimal() + ggtitle('t-SNE visualisation of variables'))
+```
+
+The Module Membership variables are grouped by Module-Trait correlation, with positive correlations on one side, negative on the other, and modules with low correlation far away from the SFARI tag
+
+```{r tsne_mtcor_variables, warning=FALSE}
+mtcor_by_module = original_dataset %>% dplyr::select(Module, MTcor) %>% unique
+colnames(mtcor_by_module) = c('ID','MTcor')
+
+plot_data = mtcor_by_module %>% mutate(ID = gsub('#','MM.',ID)) %>% right_join(plot_data, by='ID')
+
+ggplotly(plot_data %>% ggplot(aes(C1, C2, color=MTcor)) + geom_point(aes(id=ID)) + 
+         scale_color_viridis() + theme_minimal() + 
+         ggtitle('t-SNE of variables coloured by Module-Diagnosis correlation'))
+
+rm(mtcor_by_module, tsne)
+```
+
+### Visualising the observations
+
+- The two main patterns that seem to characterise the genes are their Gene Significance and the Module-Diagnosis correlation of their corresponding module
+
+- Mean Expression doesn't seem to play an important role
+
+- I don't know what the 2nd PC is capturing
+
+```{r pca_obs, fig.width=10, fig.height=10, warning=FALSE}
+
+# Mean Expression data
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+mean_expr = data.frame('ID'=rownames(datExpr), 'meanExpr' = rowMeans(datExpr))
+
+# PCA
+pca = dataset %>% t %>% prcomp
+
+plot_data = data.frame('ID'=rownames(dataset), 'PC1'=pca$rotation[,1], 'PC2'=pca$rotation[,2], 
+                       'SFARI'=dataset$SFARI, 'MTcor'=dataset$MTcor, 'GS'=dataset$GS) %>%
+            mutate(alpha=ifelse(SFARI, 0.7, 0.2)) %>% left_join(mean_expr, by='ID')
+
+p1 = plot_data %>% ggplot(aes(PC1, PC2, color=MTcor)) + geom_point(alpha=0.4) + scale_color_viridis() + 
+     theme_minimal() + ggtitle('Genes coloured by Module-Diagnosis correlation') +
+     xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1]),'%)')) +
+     ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2]),'%)')) +
+     theme(legend.position='bottom')
+
+p2 = plot_data %>% ggplot(aes(PC1, PC2, color=GS)) + geom_point(alpha=0.4) + scale_color_viridis() + 
+     theme_minimal() + ggtitle('Genes coloured by Gene Significance') + theme(legend.position='bottom')
+
+p3 = plot_data %>% ggplot(aes(PC1, PC2, color=SFARI)) + geom_point(alpha = plot_data$alpha) +
+     theme_minimal() + ggtitle('Genes coloured by SFARI label') + theme(legend.position='bottom')
+p3 = ggExtra::ggMarginal(p3, type='density', groupColour=TRUE, size=10)
+
+p4 = plot_data %>% ggplot(aes(PC1, PC2, color=meanExpr)) + geom_point(alpha=0.4) + scale_color_viridis() + 
+     theme_minimal() + ggtitle('Genes coloured by mean level of expression') + theme(legend.position='bottom')
+
+grid.arrange(p1, p2, p3, p4, nrow=2)
+
+
+rm(pca, datExpr, datGenes, datMeta, dds, DE_info, mean_expr, p1, p2, p3, p4)
+```
+
+---
+
+## Resampling to reduce class imbalance
+
+<br>
+
+For now, will do this using over- and under-sampling of the classes, but later on  **should check SMOTE (Synthetic Minority Over-sampling Technique) method**
+
+Need to divide first into train and test sets to keep the sets independent: using 80% of the Positive observations on the training set
+
+```{r}
+positive_idx = which(dataset$SFARI)
+negative_idx = which(!dataset$SFARI)
+
+set.seed(1234)
+positive_test_idx = sort(sample(positive_idx, size=floor(0.2*length(positive_idx))))
+positive_train_idx = positive_idx[!positive_idx %in% positive_test_idx]
+
+set.seed(1234)
+negative_test_idx = sort(sample(negative_idx, size=floor(0.2*length(positive_idx))))
+negative_train_idx = negative_idx[!negative_idx %in% negative_test_idx]
+
+train_set = dataset[c(positive_train_idx,negative_train_idx),]
+test_set = dataset[c(positive_test_idx,negative_test_idx),]
+
+rm(positive_idx, negative_idx, positive_train_idx, positive_test_idx, negative_train_idx, negative_test_idx)
+```
+
+### Balancing the dataset to obtain a 1:1 ratio in labels
+
+Over-sampling observations with positive SFARI label: Sample with replacement 4x original number of observations
+
+Sample with replacement positive observations in train set
+
+```{r}
+positive_obs = which(train_set$SFARI)
+
+set.seed(1234)
+add_obs = sample(positive_obs, size=3*length(positive_obs), replace=TRUE)
+
+train_set = train_set[c(1:nrow(train_set), add_obs),]
+
+rm(positive_obs, add_obs)
+```
+
+Under-sampling observations with negative SFARI labels
+```{r}
+print(paste0('Keeping ~',round(100*sum(train_set$SFARI)/sum(!train_set$SFARI)),
+             '% of the Negative observations in the training set'))
+
+negative_obs = which(!train_set$SFARI)
+set.seed(1234)
+remove_obs = sample(negative_obs, size=(sum(!train_set$SFARI)-sum(train_set$SFARI)))
+
+train_set = train_set[-remove_obs,]
+
+
+rm(negative_obs, remove_obs)
+```
+
+Label distribution in training set
+```{r}
+cro(train_set$SFARI)
+```
+
+Labels distribution in test set
+```{r}
+cro(test_set$SFARI)
+```
+<br>
+
+---
+
+<br>
+
+## Logistic Regression
+
+<br>
+
+Train model
+```{r}
+train_set$SFARI = train_set$SFARI %>% as.factor
+
+fit = glm(SFARI~., data=train_set, family='binomial')
+```
+
+
+Predict labels in test set
+```{r}
+test_set$prob = predict(fit, newdata=test_set, type='response')
+test_set$pred = test_set$prob>0.5
+```
+
+<br>
+
+### Performance metrics
+
+<br>
+
+Confusion matrix
+```{r}
+conf_mat = test_set %>% apply_labels(SFARI = 'Actual Labels', 
+                                     prob = 'Assigned Probability', 
+                                     pred = 'Label Prediction')
+
+cro(conf_mat$SFARI, list(conf_mat$pred, total()))
+
+rm(conf_mat)
+```
+
+Accuracy
+```{r}
+acc = mean(test_set$SFARI==test_set$pred)
+
+print(paste0('Accuracy = ', round(acc,4)))
+
+rm(acc)
+```
+
+ROC Curve
+```{r ROC_curve}
+pred_ROCR = prediction(test_set$prob, test_set$SFARI)
+
+roc_ROCR = performance(pred_ROCR, measure='tpr', x.measure='fpr')
+AUC = performance(pred_ROCR, measure='auc')@y.values[[1]]
+
+plot(roc_ROCR, main=paste0('ROC curve (AUC=',round(AUC,2),')'), col='#009999')
+abline(a=0, b=1, col='#666666')
+```
+
+Lift Curve
+```{r lift_plot}
+lift_ROCR = performance(pred_ROCR, measure='lift', x.measure='rpp')
+plot(lift_ROCR, main='Lift curve', col='#86b300')
+
+rm(pred_ROCR, roc_ROCR, AUC, lift_ROCR)
+```
+
+<br>
+
+---
+
+<br>
+
+### Analyse model
+
+<br>
+
+SFARI genes have a slightly higher score distribution than the rest
+```{r}
+plot_data = test_set %>% dplyr::select(prob, SFARI)
+
+plot_data %>% ggplot(aes(prob, fill=SFARI, color=SFARI)) + geom_density(alpha=0.3) + xlab('Score') +
+              theme_minimal() + ggtitle('Model score distribution by SFARI Label')
+```
+
+- There seems to be a positie relation between the SFARI scores and the probability assigned by the model
+
+- The number of observations when separating the test set by SFARI score is quite small, so this is not a robust result, specially for scores 1, 2 and 6
+
+```{r}
+plot_data = test_set %>% mutate(ID=rownames(test_set)) %>% dplyr::select(ID, prob) %>%
+            left_join(original_dataset %>% mutate(ID=rownames(original_dataset)), by='ID') %>%
+            dplyr::select(ID, prob, gene.score) %>% apply_labels(gene.score='SFARI Gene score')
+
+cro(plot_data$gene.score)
+
+mean_vals = plot_data %>% group_by(gene.score) %>% summarise(mean_prob = mean(prob))
+
+# plot_data %>% ggplot(aes(prob, color=gene.score, fill=gene.score)) + geom_density(alpha=0.25) + 
+#               geom_vline(data=mean_vals, aes(xintercept=mean_prob, color=gene.score), linetype='dashed') +
+#               scale_colour_manual(values=SFARI_colour_hue(r=c(1:6,8,7))) +
+#               scale_fill_manual(values=SFARI_colour_hue(r=c(1:6,8,7))) + 
+#               ggtitle('Distribution of probabilities by SFARI score') +
+#               xlab('Probability') + ylab('Density') + theme_minimal()
+
+ggplotly(plot_data %>% ggplot(aes(gene.score, prob, fill=gene.score)) + geom_boxplot() + 
+              scale_fill_manual(values=SFARI_colour_hue(r=c(1:6,8,7))) + 
+              ggtitle('Distribution of probabilities by SFARI score') +
+              xlab('SFARI score') + ylab('Probability') + theme_minimal())
+
+rm(mean_vals)
+```
+
+Summary of logistic regression results
+
+```{r}
+summary(fit)
+```
+
+<br>
+
+There doesn't seem to be a relation between the modules' coefficient and their correlation with Diagnosis, although there is correlation between the variables, so it's not correct to analyse their coefficients when this happens
+
+Also, this result changes a lot between different runs
+```{r, warning=FALSE, message=FALSE}
+var_fit_info = summary(fit)$coefficients %>% as.data.frame %>% 
+               mutate(signif=`Pr(>|z|)`<0.05, ID=rownames(summary(fit)$coefficients))
+
+plot_data = original_dataset %>% dplyr::select(Module, MTcor) 
+colnames(plot_data) = c('ID','MTcor')
+
+plot_data = plot_data %>% mutate(ID=gsub('#','MM.',ID)) %>% group_by(ID, MTcor) %>% 
+            tally %>% inner_join(var_fit_info, by='ID')
+
+ggplotly(plot_data %>% ggplot(aes(Estimate, MTcor, color=signif, size=n)) + geom_point(aes(id=ID)) + 
+         geom_smooth(method='lm', se=FALSE) + theme_minimal() +
+         xlab('Coefficient in regression') + ylab('Module-Diagnosis correlation'))
+
+rm(var_fit_info)
+```
+
+There is strong correlations between variables
+```{r, fig.width=10, fig.height=10}
+cors = cor(train_set[,-ncol(train_set)])
+heatmap.2(cors, dendrogram='none', col=brewer.pal(11,'RdBu'), scale='none', trace='none')
+rm(cors)
+```
+
+<br>
+
+Genes with highest scores in test set
+
+<br>
+
+- Most of the genes belong to the SFARI dataset
+
+- There's not a single gene with a SFARI score of 6
+
+```{r}
+test_set %>% dplyr::select(prob, SFARI) %>% mutate(ID = rownames(test_set)) %>% 
+             arrange(desc(prob)) %>% top_n(50, wt=prob) %>%
+             left_join(original_dataset %>% mutate(ID=rownames(original_dataset)), by='ID')  %>% 
+             left_join(gene_names, by = c('ID'='ensembl_gene_id')) %>%
+             dplyr::rename('GeneSymbol' = external_gene_id, 'Probability' = prob, 'ModuleDiagnosis_corr' = MTcor) %>%
+             mutate(ModuleDiagnosis_corr = round(ModuleDiagnosis_corr,4), Probability = round(Probability,4)) %>%
+             dplyr::select(GeneSymbol, gene.score, ModuleDiagnosis_corr, Module, Probability) %>%
+             kable(caption = 'Genes with highest model probabilities from the test set')
+```
+
+---
+
+<br><br>
+
+### Negative samples distribution
+
+Running the model on all non-SFARI genes
+```{r}
+negative_set = dataset %>% filter(!SFARI) %>% dplyr::select(-SFARI)
+rownames(negative_set) = rownames(dataset)[!dataset$SFARI]
+
+negative_set$prob = predict(fit, newdata=negative_set, type='response')
+negative_set$pred = negative_set$prob>0.5
+
+negative_set_table = negative_set %>% apply_labels(prob = 'Assigned Probability', 
+                                                   pred = 'Label Prediction')
+```
+
+```{r}
+cro(negative_set_table$pred)
+
+cat(paste0('\n', sum(negative_set$pred), ' genes are predicted as ASD-related'))
+```
+
+```{r}
+negative_set %>% ggplot(aes(prob)) + geom_density(color='#F8766D', fill='#F8766D', alpha=0.5) +
+                 geom_vline(xintercept=0.5, color='#333333', linetype='dotted') + 
+                 ggtitle('Probability distribution of all the Negative samples in the dataset') + 
+                 theme_minimal()
+```
+
+#### Probability and Gene Significance
+
+There's a lot of noise, but the genes with the highest probabilities have slightly higher (absolute) Gene Significance
+
+```{r, message=FALSE}
+negative_set %>% ggplot(aes(prob, GS, color=MTcor)) + geom_point() + geom_smooth(method='loess', color='#666666') +
+                 geom_hline(yintercept=0, color='gray', linetype='dashed') +
+                 scale_color_gradientn(colours=c('#F8766D','white','#00BFC4')) + 
+                 ggtitle('Relation between Probability and Gene Significance') + theme_minimal()
+```
+
+
+```{r, message=FALSE}
+negative_set %>% ggplot(aes(prob, abs(GS), color=MTcor)) + geom_point() + 
+                 geom_hline(yintercept=mean(negative_set$absGS), color='gray', linetype='dashed') + 
+                 geom_smooth(method='loess', color='#666666') +
+                 scale_color_gradientn(colours=c('#F8766D','white','#00BFC4')) + 
+                 ggtitle('Relation between Model probability and Gene Significance') + theme_minimal()
+```
+
+<br>
+
+#### Probability and Module-Diagnosis correlation
+
+On average, the model seems to be assigning a probability inversely proportional to the Module-Diagnosis correlation of the module, with the highest positively correlated modules having the lowest average probability and the highest negatively correlated modules the highest average probability. But the difference isn't big
+
+```{r probability_and_MTcor, fig.width=10, message=FALSE}
+negative_set %>% ggplot(aes(MTcor, prob, color=GS)) + geom_point() + geom_smooth(method='loess', color='#666666') + 
+                 geom_hline(yintercept=mean(negative_set$prob), color='gray', linetype='dashed') +
+                 scale_color_gradientn(colours=c('#F8766D','#F8766D','white','#00BFC4','#00BFC4')) + 
+                 xlab('Modules ordered by their correlation to ASD') + ylab('Model probability') +
+                 theme_minimal()
+```
+
+Summarised version, plotting by module instead of by gene
+
+The difference in the trend lines between this plot and the one above is that the one above takes all the points into consideration while this considers each module as an observation by itself, so the top one is strongly affected by big modules and the bottom one treats all modules the same
+
+The model seems to give higher probabilities to genes belonging to modules with a small (absolute) correlation to Diagnosis, although the difference isn't much
+```{r, warning=FALSE, message=FALSE}
+plot_data = negative_set %>% group_by(MTcor) %>% summarise(mean = mean(prob), sd = sd(prob), n = n()) %>%
+            mutate(MTcor_sign = ifelse(MTcor>0, 'Positive', 'Negative')) %>% left_join(original_dataset, by='MTcor') %>%
+            dplyr::select(Module, MTcor, MTcor_sign, mean, sd, n) %>% distinct()
+colnames(plot_data)[1] = 'ID'
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, mean, size=n, color=MTcor_sign)) + geom_point(aes(id=ID)) + 
+         geom_smooth(method='loess', color='gray', se=FALSE) + geom_smooth(method='lm', se=FALSE) + 
+         xlab('Module-Diagnosis correlation') + ylab('Mean Probability by Model') + theme_minimal())
+```
+
+#### Probability and level of expression
+
+There is a positive relation between level of expression and probability, the model seems to be capturing indirectly the level of expression of the genes to make the prediction, so it's introducing the same bias 
+
+```{r}
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+```
+
+```{r probability_and_meanExpr, warning=FALSE, message=FALSE, fig.width=10}
+mean_and_sd = data.frame(ID=rownames(datExpr), meanExpr=rowMeans(datExpr), sdExpr=apply(datExpr,1,sd))
+
+plot_data = negative_set %>% mutate(ID=rownames(negative_set)) %>% left_join(mean_and_sd, by='ID') %>% 
+            left_join(original_dataset %>% mutate(ID=rownames(original_dataset)) %>% 
+                      dplyr::select(ID, Module), by='ID')
+colnames(plot_data)[ncol(plot_data)] = 'Module'
+
+plot_data %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.2, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.3) + 
+              geom_smooth(method='lm', color='#999999', se=FALSE, alpha=1) + 
+              theme_minimal() + ggtitle('Mean expression vs model probability by gene')
+
+rm(mean_and_sd)
+```
+
+```{r, message=FALSE}
+plot_data2 = plot_data %>% group_by(Module) %>% summarise(meanExpr = mean(meanExpr), meanProb = mean(prob), n=n())
+
+ggplotly(plot_data2 %>% ggplot(aes(meanExpr, meanProb, size=n)) + geom_point(color=plot_data2$Module) + 
+         geom_smooth(method='loess', se=TRUE, color='gray', alpha=0.1, size=0.7) + 
+         geom_smooth(method='lm', se=FALSE, color='gray') + theme_minimal() + theme(legend.position='none') + 
+         ggtitle('Mean expression vs model probability by Module'))
+
+rm(plot_data2)
+```
+
+#### Probability and level of expression
+
+There is also a positive relation between the standard deviation of a gene and its regression score, the model could be capturing this characteristic of the genes to make the prediction, and could be introducing bias
+
+```{r probability_and_SD, warning=FALSE, message=FALSE, fig.width=10}
+plot_data %>% filter(sdExpr<0.5) %>% ggplot(aes(sdExpr, prob)) + geom_point(alpha=0.1, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.2) + 
+              geom_smooth(method='lm', color='#999999', se=FALSE, alpha=1) + 
+              theme_minimal() + ggtitle('SD vs model probability by gene')
+```
+
+This approximation curve looks like the opposite of the trend found between mean/sd and model scores
+```{r message=FALSE}
+plot_data %>% ggplot(aes(meanExpr, sdExpr)) + geom_point(alpha=0.1, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.3) + 
+              geom_smooth(method='lm', color='#999999', se=FALSE, alpha=1) + 
+              scale_x_log10() + scale_y_log10() +
+              theme_minimal() + ggtitle('Mean expression vs SD by gene')
+```
+
+#### Probability and lfc
+
+There is a relation between probability and lfc, so it *IS* capturing a bit of true information (because lfc and mean expression were negatively correlated and it still has a positive relation in the model)
+```{r probabilty_and_lfc, message=FALSE, fig.width=10}
+plot_data = negative_set %>% mutate(ID=rownames(negative_set)) %>% 
+            left_join(DE_info %>% mutate(ID=rownames(DE_info)), by='ID')
+
+plot_data %>% filter(abs(log2FoldChange)<10) %>%
+              ggplot(aes(log2FoldChange, prob)) + geom_point(alpha=0.1, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.3) + 
+              theme_minimal() + ggtitle('lfc vs model probability by gene')
+```
+<br><br>
+
+### Conclusion
+
+The model is capturing the mean level of expression of the genes (indirectly through module memberhsip), which is a strong bias found in the SFARI scores, but it seems to be capturing a bit of true biological signal as well (based on the GS and the log fold change plots) 
+
+<!-- ... -->
+
+<!-- **New conclusion:** The model seems to be capturing some sort of confounding variable to make the predictions, it would seem that it's related to the mean expression or the standard deviation of the genes, but in `10_10_20_data_preprocessing_standardising_expr.RData` we standardised the dataset and it made no difference in the resulting clusterings, which means that there is some other behaviour related to the level of expression of a gene or its standard deviation that is biasing the classifier, but I don't know what it could be or how to fix it ... -->
+
+---
+
+#### Saving results
+
+```{r save_results}
+save(train_set, test_set, negative_set, fit, dataset, file='./../Data/LR_model.RData')
+```
+<br><br>
+
+---
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>
