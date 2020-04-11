@@ -12,9 +12,9 @@ library(knitr)
 library(plotly) ; library(viridis) ; library(gridExtra) ; library(RColorBrewer)
 library(biomaRt)
 library(Rtsne)
-library(knitr)
-library(ROCR)
-library(expss)
+library(ROCR) ; library(car)
+library(corrplot)
+library(expss) ; library(knitr)
 
 SFARI_colour_hue = function(r) {
   pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
@@ -190,22 +190,45 @@ For now, will do this using over- and under-sampling of the classes, but later o
 
 Need to divide first into train and test sets to keep the sets independent: using 80% of the Positive observations on the training set
 
+**Note:** Even though our label is binary, I want to have representative samples for all SFARI scores in both the training and test data, so instead of pooling all the SFARI scores together and randomly selecting 80% of the samples, I'm going to create the positive set selecting 80% of each of the samples by score
+
 ```{r}
-positive_idx = which(dataset$SFARI)
+set.seed(123)
+
+positive_sample_balancing_SFARI_scores = function(p){
+  
+  positive_train_idx = c()
+  positive_test_idx = c()
+  
+  for(score in 1:6){
+    score_genes = rownames(original_dataset)[rownames(original_dataset) %in% rownames(dataset) & original_dataset$gene.score == score]
+    score_idx = which(rownames(dataset) %in% score_genes)
+    score_train_idx = sample(score_idx, size = ceiling(p*length(score_idx)))
+    score_test_idx = score_idx[!score_idx %in% score_train_idx]
+    
+    positive_train_idx = c(positive_train_idx, score_train_idx)
+    positive_test_idx = c(positive_test_idx, score_test_idx) 
+  }
+  
+  return(list('train' = sort(positive_train_idx), 'test' = sort(positive_test_idx)))
+}
+
+# 80% of the samples for the training set
+p = 0.8
+
+positive_idx = positive_sample_balancing_SFARI_scores(p)
+positive_train_idx = positive_idx[['train']]
+positive_test_idx = positive_idx[['test']]
+
 negative_idx = which(!dataset$SFARI)
+negative_train_idx = sort(sample(negative_idx, size=ceiling(p*length(negative_idx))))
+negative_test_idx = negative_idx[!negative_idx %in% negative_train_idx]
 
-set.seed(1234)
-positive_test_idx = sort(sample(positive_idx, size=floor(0.2*length(positive_idx))))
-positive_train_idx = positive_idx[!positive_idx %in% positive_test_idx]
+train_set = dataset[c(positive_train_idx, negative_train_idx),]
+test_set = dataset[c(positive_test_idx, negative_test_idx),]
 
-set.seed(1234)
-negative_test_idx = sort(sample(negative_idx, size=floor(0.2*length(positive_idx))))
-negative_train_idx = negative_idx[!negative_idx %in% negative_test_idx]
-
-train_set = dataset[c(positive_train_idx,negative_train_idx),]
-test_set = dataset[c(positive_test_idx,negative_test_idx),]
-
-rm(positive_idx, negative_idx, positive_train_idx, positive_test_idx, negative_train_idx, negative_test_idx)
+rm(positive_idx, negative_idx, positive_train_idx, positive_test_idx, negative_train_idx, negative_test_idx,
+   p, positive_sample_balancing_SFARI_scores)
 ```
 
 ### Balancing the dataset to obtain a 1:1 ratio in labels
@@ -217,7 +240,6 @@ Sample with replacement positive observations in train set
 ```{r}
 positive_obs = which(train_set$SFARI)
 
-set.seed(1234)
 add_obs = sample(positive_obs, size=3*length(positive_obs), replace=TRUE)
 
 train_set = train_set[c(1:nrow(train_set), add_obs),]
@@ -226,18 +248,19 @@ rm(positive_obs, add_obs)
 ```
 
 Under-sampling observations with negative SFARI labels
+
 ```{r}
 print(paste0('Keeping ~',round(100*sum(train_set$SFARI)/sum(!train_set$SFARI)),
              '% of the Negative observations in the training set'))
 
 negative_obs = which(!train_set$SFARI)
-set.seed(1234)
-remove_obs = sample(negative_obs, size=(sum(!train_set$SFARI)-sum(train_set$SFARI)))
 
-train_set = train_set[-remove_obs,]
+keep_obs = sample(negative_obs, size=sum(train_set$SFARI))
+
+train_set = train_set[c(keep_obs, which(train_set$SFARI)),]
 
 
-rm(negative_obs, remove_obs)
+rm(negative_obs, keep_obs)
 ```
 
 Label distribution in training set
@@ -290,7 +313,7 @@ cro(conf_mat$SFARI, list(conf_mat$pred, total()))
 rm(conf_mat)
 ```
 
-Accuracy
+#### Accuracy
 ```{r}
 acc = mean(test_set$SFARI==test_set$pred)
 
@@ -299,7 +322,7 @@ print(paste0('Accuracy = ', round(acc,4)))
 rm(acc)
 ```
 
-ROC Curve
+#### ROC Curve
 ```{r ROC_curve}
 pred_ROCR = prediction(test_set$prob, test_set$SFARI)
 
@@ -310,7 +333,7 @@ plot(roc_ROCR, main=paste0('ROC curve (AUC=',round(AUC,2),')'), col='#009999')
 abline(a=0, b=1, col='#666666')
 ```
 
-Lift Curve
+#### Lift Curve
 ```{r lift_plot}
 lift_ROCR = performance(pred_ROCR, measure='lift', x.measure='rpp')
 plot(lift_ROCR, main='Lift curve', col='#86b300')
@@ -340,7 +363,7 @@ plot_data %>% ggplot(aes(prob, fill=SFARI, color=SFARI)) + geom_density(alpha=0.
 
 - The number of observations when separating the test set by SFARI score is quite small, so this is not a robust result, specially for scores 1, 2 and 6
 
-```{r}
+```{r, fig.width=10}
 plot_data = test_set %>% mutate(ID=rownames(test_set)) %>% dplyr::select(ID, prob) %>%
             left_join(original_dataset %>% mutate(ID=rownames(original_dataset)), by='ID') %>%
             dplyr::select(ID, prob, gene.score) %>% apply_labels(gene.score='SFARI Gene score')
@@ -364,50 +387,34 @@ ggplotly(plot_data %>% ggplot(aes(gene.score, prob, fill=gene.score)) + geom_box
 rm(mean_vals)
 ```
 
-Summary of logistic regression results
+<br>
 
-```{r}
-summary(fit)
-```
+#### Testing for Multicollinearity with Variance Inflation Factors (VIF)
 
 <br>
 
-There doesn't seem to be a relation between the modules' coefficient and their correlation with Diagnosis, although there is correlation between the variables, so it's not correct to analyse their coefficients when this happens
+Any variable with a VIF above 10 is considered to have strong multicollinearity: the dataset has a really big problem with multicollinearity :/
 
-Also, this result changes a lot between different runs
-```{r, warning=FALSE, message=FALSE}
-var_fit_info = summary(fit)$coefficients %>% as.data.frame %>% 
-               mutate(signif=`Pr(>|z|)`<0.05, ID=rownames(summary(fit)$coefficients))
+Multicollinearity affects the coefficients and p-values of the regression, but it doesn't affect the predictions, precision of the predictions or the goodness-of-fit statistics [ref](https://statisticsbyjim.com/regression/multicollinearity-in-regression-analysis/). So we cannot analyse the coefficients to see which features are the most important, but all the results from this analysis are valid
 
-plot_data = original_dataset %>% dplyr::select(Module, MTcor) 
-colnames(plot_data) = c('ID','MTcor')
+```{r, fig.width=12, fig.height=12}
+# VIF
+car::vif(fit) %>% sort
 
-plot_data = plot_data %>% mutate(ID=gsub('#','MM.',ID)) %>% group_by(ID, MTcor) %>% 
-            tally %>% inner_join(var_fit_info, by='ID')
-
-ggplotly(plot_data %>% ggplot(aes(Estimate, MTcor, color=signif, size=n)) + geom_point(aes(id=ID)) + 
-         geom_smooth(method='lm', se=FALSE) + theme_minimal() +
-         xlab('Coefficient in regression') + ylab('Module-Diagnosis correlation'))
-
-rm(var_fit_info)
+# Correlation plot
+corrplot.mixed(cor(train_set[,-ncol(train_set)]), lower = 'number', lower.col = 'gray', number.cex = .6, tl.pos = 'l', tl.col = '#666666')
 ```
+<br>
 
-There is strong correlations between variables
-```{r, fig.width=10, fig.height=10}
-cors = cor(train_set[,-ncol(train_set)])
-heatmap.2(cors, dendrogram='none', col=brewer.pal(11,'RdBu'), scale='none', trace='none')
-rm(cors)
-```
+#### Genes with highest scores in test set
 
 <br>
 
-Genes with highest scores in test set
+- 3 of the 5 genes with SFARI score of 1 are in the top 6 genes
 
-<br>
+- Considering the ratio of 3021:177, there are a lot of genes with a SFARI score in the top genes
 
-- Most of the genes belong to the SFARI dataset
-
-- There's not a single gene with a SFARI score of 6
+- There's not a single gene with a SFARI score of 5 or 6
 
 ```{r}
 test_set %>% dplyr::select(prob, SFARI) %>% mutate(ID = rownames(test_set)) %>% 
@@ -420,16 +427,19 @@ test_set %>% dplyr::select(prob, SFARI) %>% mutate(ID = rownames(test_set)) %>%
              kable(caption = 'Genes with highest model probabilities from the test set')
 ```
 
+<br>
 ---
 
 <br><br>
 
 ### Negative samples distribution
 
-Running the model on all non-SFARI genes
+<br>
+
+Running the model on all non-SFARI genes (excluding the ones in the train set)
 ```{r}
-negative_set = dataset %>% filter(!SFARI) %>% dplyr::select(-SFARI)
-rownames(negative_set) = rownames(dataset)[!dataset$SFARI]
+negative_set = dataset %>% filter(!SFARI & !rownames(.) %in% rownames(train_set)) %>% dplyr::select(-SFARI)
+rownames(negative_set) = rownames(dataset)[!dataset$SFARI & !rownames(dataset) %in% rownames(train_set)]
 
 negative_set$prob = predict(fit, newdata=negative_set, type='response')
 negative_set$pred = negative_set$prob>0.5
