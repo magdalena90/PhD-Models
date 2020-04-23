@@ -12,7 +12,7 @@ library(knitr)
 library(plotly) ; library(viridis) ; library(gridExtra) ; library(RColorBrewer)
 library(biomaRt)
 library(Rtsne)
-library(glmnet) ; library(ROCR) ; library(car)
+library(caret) ; library(ROCR) ; library(car)
 library(corrplot)
 library(expss) ; library(knitr)
 
@@ -22,10 +22,11 @@ SFARI_colour_hue = function(r) {
 ```
 
 ## Background
+<br>
 
 In 20_04_07_LR.html we performed a logistic regression but we discovered that the features were strongly correlated. This inflates the standard error of the coefficients, making them no longer interpretable.
 
-```{r, fig.width=12, fig.height=12, warning=FALSE, message=FALSE}
+```{r, warning=FALSE, message=FALSE}
 
 # Clusterings
 clustering_selected = 'DynamicHybridMergedSmall'
@@ -48,10 +49,18 @@ gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=rown
 ```
 
 Variance Inflation Factor (VIF) and correlation plot
-```{r}
+```{r, fig.width=10, fig.height=3, warning=FALSE, message=FALSE}
 # VIF
-car::vif(fit) %>% sort
+plot_data = data.frame('Feature' = car::vif(fit) %>% sort %>% names,
+                       'VIF' = car::vif(fit) %>% sort %>% unname) %>%
+            mutate(outlier = VIF>10)
 
+plot_data %>% ggplot(aes(reorder(Feature, -VIF), VIF, fill = !outlier)) + geom_bar(stat='identity') + scale_y_log10() +
+              geom_hline(yintercept = 10, color = 'gray', linetype = 'dashed') + xlab('Model Features') + theme_minimal() +
+              theme(legend.position = 'none', axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r, fig.width=12, fig.height=12, warning=FALSE, message=FALSE}
 # Correlation plot
 corrplot.mixed(cor(train_set[,-ncol(train_set)]), lower = 'number', lower.col = 'gray', number.cex = .6, tl.pos = 'l', tl.col = '#666666')
 
@@ -59,7 +68,7 @@ corrplot.mixed(cor(train_set[,-ncol(train_set)]), lower = 'number', lower.col = 
 rm(getinfo, mart, clusterings)
 ```
 
-#### Possible solutions to Multicollinearity:
+### Possible solutions to Multicollinearity:
 <br>
 
 1. Remove all variables with a VIF>10: We would lose all but three of our variables, not ideal
@@ -84,26 +93,27 @@ Train model
 ```{r}
 train_set$SFARI = train_set$SFARI %>% as.factor
 
-x = train_set[,-ncol(train_set)] %>% as.matrix
-y = train_set$SFARI
 lambda_seq = 10^seq(1, -4, by = -.1)
 
-fit = cv.glmnet(x, y, alpha = 0, lambda  = lambda_seq, family = 'binomial')
+set.seed(123)
+fit = train(SFARI ~., data = train_set, method = 'glmnet', trControl = trainControl('cv', number = 10),
+              tuneGrid = expand.grid(alpha = 0, lambda = lambda_seq))
 
-best_lambda = fit$lambda.min
-cat(paste0('The best model has a lambda of ', best_lambda))
-
-best_fit = glmnet(x, y, alpha=0, lambda=best_lambda, family='binomial')
+cat(paste0('The best model has a lambda of ', round(fit$bestTune$lambda,4)))
 
 
-rm(x, y, lambda_seq, fit)
+rm(lambda_seq)
 ```
 
 
 Predict labels in test set
 ```{r}
-test_set$prob = predict(best_fit, newx = test_set[,1:(ncol(train_set)-1)] %>% as.matrix, s=best_lambda, type='response') %>% as.vector
+predictions = fit %>% predict(test_set, type='prob')
+
+test_set$prob = predictions$`TRUE`
 test_set$pred = test_set$prob>0.5
+
+rm(predictions)
 ```
 
 <br>
@@ -128,7 +138,7 @@ rm(conf_mat)
 ```{r}
 acc = mean(test_set$SFARI==test_set$pred)
 
-print(paste0('Accuracy = ', round(acc,4)))
+cat(paste0('Accuracy = ', round(acc,4)))
 
 rm(acc)
 ```
@@ -162,21 +172,25 @@ rm(pred_ROCR, roc_ROCR, AUC, lift_ROCR)
 
 <br>
 
-- There is apositive relation between the coefficient assigned to the membership of each module and the percentage of SFARI genes that are assigned to that module
-
 - MTcor has a low coefficient and Gene Significance has a negative coefficient
 
 ```{r, warning=FALSE, message=FALSE}
 gene_corr_info = dataset %>% mutate('ID' = rownames(dataset)) %>% dplyr::select(ID, MTcor, SFARI) %>% left_join(assigned_module, by ='ID') %>%
                  mutate(Module = gsub('#','',Module))
 
-coef_info = best_fit$beta %>% as.matrix %>% data.frame %>% dplyr::rename('coef' = s0) %>% mutate('feature' = gsub('MM.','',rownames(.))) %>% 
-            left_join(gene_corr_info, by = c('feature' = 'Module')) %>% dplyr::select(feature, coef, MTcor, SFARI) %>% 
-            group_by(feature, coef, MTcor) %>%  summarise('SFARI_perc' = mean(SFARI)) %>% arrange(desc(coef))
+coef_info = coef(fit$finalModel, fit$bestTune$lambda) %>% as.matrix %>% data.frame %>% dplyr::rename('coef' = X1) %>%
+            mutate('feature' = gsub('MM.','',rownames(.))) %>% left_join(gene_corr_info, by = c('feature' = 'Module')) %>% 
+            dplyr::select(feature, coef, MTcor, SFARI) %>% group_by(feature, coef, MTcor) %>% summarise('SFARI_perc' = mean(SFARI)) %>%
+            arrange(desc(coef))
 
 kable(coef_info %>% dplyr::select(feature, coef) %>% rename('Feature' = feature, 'Coefficient' = coef),
       align = 'cc', caption = 'Regression Coefficients')
+```
+<br>
 
+- There is a positive relation between the coefficient assigned to the membership of each module and the percentage of SFARI genes that are assigned to that module
+
+```{r, warning=FALSE, message=FALSE}
 ggplotly(coef_info %>% dplyr::rename('Module' = feature) %>% filter(!is.na(MTcor)) %>%
               ggplot(aes(coef, SFARI_perc)) +  geom_smooth(method = 'lm', color = 'gray', alpha = 0.1) + 
               geom_point(aes(id = Module), color = paste0('#',coef_info$feature[!is.na(coef_info$MTcor)])) + 
@@ -184,7 +198,11 @@ ggplotly(coef_info %>% dplyr::rename('Module' = feature) %>% filter(!is.na(MTcor
               ylab('% of SFARI genes in Module'))
 ```
 
-- There is not an observable relation between the coefficient and the correlation of the module and the diagnosis. This is not a surprise since we knew that there is a negative relation between SFARI genes and Module-Diagnosis correlation from Preprocessing/Gandal/AllRegions/RMarkdowns/20_04_03_WGCNA_modules_EA.html. The fact that the relation between coefficient and Module-Diagnosis correlation is not negative could even be a good sign that the model is picking some biological signal
+<br>
+
+- There is a really small negative relation between the coefficient and the correlation of the module and the diagnosis.
+
+This is not a surprise since we knew that there was a negative relation between SFARI genes and Module-Diagnosis correlation from Preprocessing/Gandal/AllRegions/RMarkdowns/20_04_03_WGCNA_modules_EA.html. The fact that the relation between coefficient and Module-Diagnosis correlation is so small now could even be a good sign that the model is picking some biological signal as well as the SFARI patterns (since the relation with the biological signals is positive)
 
 ```{r, warning=FALSE, message=FALSE}
 ggplotly(coef_info %>% dplyr::rename('Module' = feature) %>% filter(!is.na(MTcor)) %>%
@@ -209,8 +227,10 @@ SFARI genes have a slightly higher score distribution than the rest
 ```{r}
 plot_data = test_set %>% dplyr::select(prob, SFARI)
 
-plot_data %>% ggplot(aes(prob, fill=SFARI, color=SFARI)) + geom_density(alpha=0.3) + xlab('Score') +
-              theme_minimal() + ggtitle('Model score distribution by SFARI Label')
+ggplotly(plot_data %>% ggplot(aes(prob, fill=SFARI, color=SFARI)) + geom_density(alpha=0.3) + xlab('Score') +
+         geom_vline(xintercept = mean(plot_data$prob[plot_data$SFARI]), color = '#00C0C2', linetype = 'dashed') +
+         geom_vline(xintercept = mean(plot_data$prob[!plot_data$SFARI]), color = '#FF7371', linetype = 'dashed') +
+         theme_minimal() + ggtitle('Model score distribution by SFARI Label'))
 ```
 
 - There seems to be a positive relation between the SFARI scores and the probability assigned by the model
@@ -238,9 +258,11 @@ Genes with highest scores in test set
 
 <br>
 
-- Considering the class imbalance in the train set, there are many SFARI scores in here
+- Considering the class imbalance in the test set (1:69), there are many SFARI scores in here (1:13)
 
-- There's not a single gene with a SFARI score of 5 or 6
+- 3 of the 5 SFARI genes with a score of 1 in the test set are in this top 50 list
+
+- There aren't any SFARI genes with a score lower than 3 (even though 69% of the SFARI genes in the test score have a score lower than 3)
 
 ```{r}
 test_set %>% dplyr::select(prob, SFARI) %>% mutate(ID = rownames(test_set)) %>% 
@@ -253,6 +275,7 @@ test_set %>% dplyr::select(prob, SFARI) %>% mutate(ID = rownames(test_set)) %>%
              dplyr::select(GeneSymbol, GeneSignificance, ModuleDiagnosis_corr, Module, Probability, gene.score) %>%
              kable(caption = 'Genes with highest model probabilities from the test set')
 ```
+<br>
 
 ---
 
@@ -264,14 +287,21 @@ test_set %>% dplyr::select(prob, SFARI) %>% mutate(ID = rownames(test_set)) %>%
 
 Selecting the Negative samples in the test set
 ```{r}
+negative_set = test_set %>% filter(SFARI)
+  
+  
+  
 negative_set = dataset %>% filter(!SFARI & !rownames(.) %in% rownames(train_set)) %>% dplyr::select(-SFARI)
 rownames(negative_set) = rownames(dataset)[!dataset$SFARI & !rownames(dataset) %in% rownames(train_set)]
 
-negative_set$prob = predict(best_fit, newx=negative_set %>% as.matrix, s=best_lambda, type='response') %>% as.vector
+predictions = predict(fit, negative_set, type='prob') %>% as.vector
+negative_set$prob = predictions$`TRUE`
 negative_set$pred = negative_set$prob>0.5
 
 negative_set_table = negative_set %>% apply_labels(prob = 'Assigned Probability', 
                                                    pred = 'Label Prediction')
+
+rm(predictions)
 ```
 
 ```{r}
@@ -292,22 +322,15 @@ negative_set %>% ggplot(aes(prob)) + geom_density(color='#F8766D', fill='#F8766D
 
 <br>
 
-There's a lot of noise, but the genes with the highest probabilities have higher (absolute) Gene Significance
+- There's a lot of noise, but the probability the model assigns to each gene seems to have a negative relation with the Gene Significance (under-expressed genes having on average the higher probabilities and over-expressed genes the lowest)
+
+- The pattern is strongest in under-expressed genes
 
 ```{r, message=FALSE}
 negative_set %>% ggplot(aes(prob, GS, color=MTcor)) + geom_point() + geom_smooth(method='loess', color='#666666') +
-                 geom_hline(yintercept=0, color='gray', linetype='dashed') +
+                 geom_hline(yintercept=0, color='gray', linetype='dashed') + xlab('Probability') +
                  scale_color_gradientn(colours=c('#F8766D','white','#00BFC4')) + 
                  ggtitle('Relation between Probability and Gene Significance') + theme_minimal()
-```
-
-
-```{r, message=FALSE}
-negative_set %>% ggplot(aes(prob, abs(GS), color=MTcor)) + geom_point() + 
-                 geom_hline(yintercept=mean(negative_set$absGS), color='gray', linetype='dashed') + 
-                 geom_smooth(method='loess', color='#666666') +
-                 scale_color_gradientn(colours=c('#F8766D','white','#00BFC4')) + 
-                 ggtitle('Relation between Model probability and Gene Significance') + theme_minimal()
 ```
 
 <br>
@@ -330,7 +353,8 @@ Summarised version, plotting by module instead of by gene
 
 The difference in the trend lines between this plot and the one above is that the one above takes all the points into consideration while this considers each module as an observation by itself, so the top one is strongly affected by big modules and the bottom one treats all modules the same
 
-The model seems to give higher probabilities to genes belonging to modules with a small (absolute) correlation to Diagnosis, although the difference isn't much
+The model seems to give higher probabilities to genes belonging to modules with a small (absolute) correlation to Diagnosis (this is unexpected)
+
 ```{r, warning=FALSE, message=FALSE}
 plot_data = negative_set %>% group_by(MTcor) %>% summarise(mean = mean(prob), sd = sd(prob), n = n()) %>%
             mutate(MTcor_sign = ifelse(MTcor>0, 'Positive', 'Negative')) %>% left_join(original_dataset, by='MTcor') %>%
@@ -356,7 +380,7 @@ datExpr = datExpr %>% data.frame
 DE_info = DE_info %>% data.frame
 ```
 
-```{r probability_and_meanExpr, warning=FALSE, message=FALSE, fig.width=10}
+```{r probability_and_meanExpr, warning=FALSE, message=FALSE}
 mean_and_sd = data.frame(ID=rownames(datExpr), meanExpr=rowMeans(datExpr), sdExpr=apply(datExpr,1,sd))
 
 plot_data = negative_set %>% mutate(ID=rownames(negative_set)) %>% left_join(mean_and_sd, by='ID') %>% 
@@ -388,7 +412,7 @@ rm(plot_data2)
 
 <br>
 
-There is a relation between probability and lfc, so it *IS* capturing a bit of true information (because lfc and mean expression were negatively correlated and it still has a positive relation in the model)
+There is a relation between probability and lfc, so it **IS*() capturing a bit of true information (because lfc and mean expression were negatively correlated and it still has a positive relation in the model)
 
 - The relation is stronger in genes under-expressed in ASD
 
@@ -425,7 +449,7 @@ The model is capturing the mean level of expression of the genes (indirectly thr
 #### Saving results
 
 ```{r save_results}
-save(train_set, test_set, negative_set, best_fit, best_lambda, dataset, file='./../Data/Ridge_model.RData')
+save(train_set, test_set, negative_set, fit, dataset, file='./../Data/Ridge_model.RData')
 ```
 <br><br>
 

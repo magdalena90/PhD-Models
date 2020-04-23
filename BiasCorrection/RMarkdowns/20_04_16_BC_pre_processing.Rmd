@@ -1,0 +1,88 @@
+---
+title: 'Bias Correction using Pre-Processing Approach'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+### Problem
+<br>
+
+As it can be seen in 20_04_08_Ridge.html, there is a relation between the score the model assigns to a gene and the gene's mean level of expression. This is a problem because we had previously discovered a bias in the SFARI scores related to mean level of expression (Preprocessing/Gandal/AllRegions/RMarkdowns/20_04_03_SFARI_genes.html), which means that this could be a confounding factor in our model and the reason why it seems to perform well, so we need to remove this bias to recover the true biological signal that is mixed with it and improve the quality of our model.
+
+<br>
+
+### Pre-Processing Approach
+<br>
+
+In this approach, we try to remove any signal related to the bias in our feature variables, this way, it cannot be picked up by the model and the bias should disappear.
+
+After the model has been trained with the bias, perform a post-processing of the classifier outputs.
+
+Since the effect of the bias is proportional to the mean level of expression of a gene, we can correct it by removing the effect of the mean expression from the probability of the model.
+
+**Problems:**
+
+- After the transformation you lose the probability interpretation of the score (we translated it to have the same mean as the original model)
+
+- According to [Identifying and Correcting Label Bias in Machine Learning](https://arxiv.org/pdf/1901.04966.pdf), decoupling the training and calibration can lead to models with poor accuracy tradeoff (when training your model it may be focusing on the bias, in our case mean expression, and overlooking more important aspects of your data, such as biological significance)
+
+- Even though we removed the level of expression bias by gene, it's still present when you aggregate the genes by modules (see Mean expression vs corrected Model score by Module). The higher the average level of expression of a module, the higher the probability (although the relation is not as strong as before)
+
+- The transformation seems to have removed a bit of biological signal along with the bias (see Probability and Gene Significance), mainly for under-expressed genes, which were the ones that originally had higher probabilities
+
+- The relation between the model's probability and the standard deviation of the genes seems to have increased (probably because level of expression and SD have a negative relation in this dataset)
+
+
+```{r load_packages, warning=FALSE, message=FALSE}
+
+library(tidyverse)
+library(knitr)
+library(plotly) ; library(viridis) ; library(gridExtra) ; library(RColorBrewer)
+library(biomaRt)
+library(mgcv)
+library(Rtsne)
+library(knitr)
+library(ROCR)
+library(expss)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+```
+
+#### Load data
+```{r, warning=FALSE, message=FALSE}
+# Clusterings
+clustering_selected = 'DynamicHybridMergedSmall'
+clusterings = read_csv('./../Data/clusters.csv')
+clusterings$Module = clusterings[,clustering_selected] %>% data.frame %>% unlist %>% unname
+
+assigned_module = data.frame('ID' = clusterings$ID, 'Module' = clusterings$Module)
+
+# Regression data
+load(file='./../Data/Ridge_model.RData')
+
+# Mean Expression data
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+DE_info = DE_info %>% data.frame
+
+# Dataset created with DynamicTreeMerged algorithm
+clustering_selected = 'DynamicHybridMergedSmall'
+original_dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'), row.names=1)
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org')
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=rownames(dataset), mart=mart)
+
+rm(dds, datGenes, datMeta, clustering_selected, clusterings)
+```
+<br>
+
+### Remove Bias
+<br>
