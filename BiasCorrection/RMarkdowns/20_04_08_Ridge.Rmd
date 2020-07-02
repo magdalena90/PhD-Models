@@ -428,9 +428,19 @@ plot_data %>% ggplot(aes(log2FoldChange, prob)) + geom_point(alpha=0.1, color='#
 - The relation is stronger in Differentially Expressed genes
 
 ```{r probabilty_and_lfc_by_DE, message=FALSE, fig.width=10}
-plot_data %>% mutate(DE = padj<0.05) %>% ggplot(aes(log2FoldChange, prob, color=DE)) + geom_point(alpha=0.1) + 
-              geom_smooth(method='loess', alpha=0.3) + 
-              theme_minimal() + ggtitle('lfc vs model probability by gene')
+p1 = plot_data %>% filter(log2FoldChange<0) %>% mutate(DE = padj<0.05) %>% ggplot(aes(log2FoldChange, prob, color=DE)) + geom_point(alpha=0.1) + 
+                   geom_smooth(method='loess', alpha=0.1) + xlab('') + ylab('Probability') + 
+                   ylim(c(min(plot_data$prob), max(plot_data$prob))) + 
+                   theme_minimal() + theme(legend.position = 'none', plot.margin=unit(c(1,-0.3,1,1), 'cm'))
+
+p2 = plot_data %>% filter(log2FoldChange>=0) %>% mutate(DE = padj<0.05) %>% ggplot(aes(log2FoldChange, prob, color=DE)) + geom_point(alpha=0.1) + 
+                   geom_smooth(method='loess', alpha=0.1) + xlab('') + ylab('Probability') + ylab('') +
+                   scale_y_continuous(position = 'right', limits = c(min(plot_data$prob), max(plot_data$prob))) +
+                   theme_minimal() + theme(plot.margin = unit(c(1,1,1,-0.3), 'cm'), axis.ticks.y = element_blank())
+
+grid.arrange(p1, p2, nrow=1, top = 'LFC vs model probability by gene', bottom = 'LFC')
+
+rm(p1, p2)
 ```
 <br><br>
 

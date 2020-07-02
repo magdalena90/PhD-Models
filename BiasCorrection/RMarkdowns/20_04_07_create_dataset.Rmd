@@ -64,7 +64,7 @@ The clusterings files include the modules obtained from WGCNA with many paramete
 - I'm going to use a version of the Dynamic Hybrid algorithm where similar modules have been merged together to have a simpler model with less parameters
 
 ```{r select_clustering_method}
-clustering_selected = 'DynamicHybridMergedSmall'
+clustering_selected = 'DynamicHybrid'
 genes_info$Module = genes_info[,clustering_selected]
 ```
 
@@ -122,7 +122,7 @@ rm(ME_object)
 
 Modules have very strong correlations with Diagnosis and not much else
 
-```{r plot_heatmap, fig.width=10, fig.height=8}
+```{r plot_heatmap, fig.width=10, fig.height=10}
 # Sort moduleTraitCor by Diagnosis
 moduleTraitCor = moduleTraitCor[order(moduleTraitCor[,1], decreasing=TRUE),]
 moduleTraitPvalue = moduleTraitPvalue[order(moduleTraitCor[,1], decreasing=TRUE),]

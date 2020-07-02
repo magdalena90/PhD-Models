@@ -394,11 +394,20 @@ plot_data %>% ggplot(aes(log2FoldChange, corrected_score)) + geom_point(alpha=0.
 
 
 
-```{r, fig.width=10, message=FALSE, warning=FALSE}
-plot_data %>% mutate(DE = padj<0.05) %>% ggplot(aes(log2FoldChange, corrected_score, color=DE)) + geom_point(alpha=0.1) + 
-             geom_smooth(method='loess', alpha=0.1) + xlab('LFC') + ylab('Corrected Probability') + 
-              geom_line(stat='smooth', method='loess', alpha=0.4, size=1.5, aes(y=prob, color = DE)) +
-              theme_minimal() + ggtitle('LFC vs model probability by gene')
+```{r, fig.width=12, message=FALSE, warning=FALSE}
+p1 = plot_data %>% filter(log2FoldChange<0) %>% mutate(DE = padj<0.05) %>% ggplot(aes(log2FoldChange, corrected_score, color=DE)) + geom_point(alpha=0.1) + 
+                   geom_smooth(method='loess', alpha=0.1) + xlab('') + ylab('Corrected Probability') + 
+                   ylim(c(min(plot_data$corrected_score), max(plot_data$corrected_score))) + 
+                   geom_line(stat='smooth', method='loess', alpha=0.4, size=1.5, aes(y=prob, color = DE)) +
+                   theme_minimal() + theme(legend.position = 'none', plot.margin=unit(c(1,-0.3,1,1), 'cm'))
+
+p2 = plot_data %>% filter(log2FoldChange>=0) %>% mutate(DE = padj<0.05) %>% ggplot(aes(log2FoldChange, corrected_score, color=DE)) + geom_point(alpha=0.1) + 
+                   geom_smooth(method='loess', alpha=0.1) + xlab('') + ylab('Corrected Probability') + ylab('') +
+                   scale_y_continuous(position = 'right', limits = c(min(plot_data$corrected_score), max(plot_data$corrected_score))) +
+                   geom_line(stat='smooth', method = 'loess', alpha=0.4, size=1.5, aes(y = prob, color = DE)) +
+                   theme_minimal() + theme(plot.margin = unit(c(1,1,1,-0.3), 'cm'), axis.ticks.y = element_blank())
+
+grid.arrange(p1, p2, nrow=1, top = 'LFC vs model probability by gene', bottom = 'LFC')
 ```
 <br>
 
